@@ -1,21 +1,37 @@
-from django.http import JsonResponse
+from rest_framework import viewsets
+
+from .models import Country, State, City
+from .serializer import CountrySerializer, StateSerializer, CitySerializer
 
 
-def profile(request):
-    # Diagnóstico temporário: mostra se o header chegou.
-    auth_header = request.META.get('HTTP_AUTHORIZATION', '')
-    print('Authorization header:', auth_header[:40] or '(vazio)')
-    print('request.user:', request.user, type(request.user).__name__)
+class CountryViewSet(viewsets.ModelViewSet):
+    """CRUD de paises."""
 
-    user = request.user
-    if not getattr(user, 'is_authenticated', False):
-        return JsonResponse({"detail": "Não autenticado"}, status=401)
+    queryset = Country.objects.all()
+    serializer_class = CountrySerializer
+    filterset_fields = ["acronym"]
+    search_fields = ["name", "acronym"]
+    ordering_fields = ["name"]
+    ordering = ["name"]
 
-    return JsonResponse({
-        "id": user.id,
-        "username": user.username,
-        "email": user.email,
-        "full_name": user.get_full_name(),
-        "is_superuser": user.is_superuser,
-        "permissions": user.permissions,
-    })
+
+class StateViewSet(viewsets.ModelViewSet):
+    """CRUD de estados."""
+
+    queryset = State.objects.select_related("country").all()
+    serializer_class = StateSerializer
+    filterset_fields = ["country", "acronym"]
+    search_fields = ["name", "acronym"]
+    ordering_fields = ["name"]
+    ordering = ["name"]
+
+
+class CityViewSet(viewsets.ModelViewSet):
+    """CRUD de cidades."""
+
+    queryset = City.objects.select_related("state", "state__country").all()
+    serializer_class = CitySerializer
+    filterset_fields = ["state", "state__country"]
+    search_fields = ["name"]
+    ordering_fields = ["name"]
+    ordering = ["name"]

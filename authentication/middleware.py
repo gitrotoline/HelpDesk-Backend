@@ -54,5 +54,6 @@ class JWTAuthMiddleware:
 
         claims = token.payload
         user_id = claims.get('user_id') or claims.get('sub')
-        extras = fetch_user(user_id) or {}
+        # Opção B: repassa o mesmo Bearer pro auth-server (chamada em nome do usuário).
+        extras = fetch_user(user_id, auth_header=header) or {}
         return RemoteUser(claims, extra=extras)
