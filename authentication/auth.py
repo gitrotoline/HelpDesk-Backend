@@ -100,8 +100,12 @@ class RemoteUser:
     is_authenticated = True
     is_anonymous = False
 
-    def __init__(self, claims, extra=None):
+    def __init__(self, claims, extra=None, access_token=None):
         merged = {**(extra or {}), **claims}
+
+        # Access token validado (o mesmo Bearer que o front enviou). Guardado
+        # aqui para repassar nas chamadas em nome do usuário ao auth-server.
+        self.access_token = access_token
 
         self.id = merged.get('user_id') or merged.get('sub')
         self.username = merged.get('username') or ''
@@ -127,6 +131,11 @@ class RemoteUser:
     @property
     def permissions(self):
         return sorted(self._permissions)
+
+    @property
+    def auth_header(self):
+        """Header pronto p/ repassar o token do usuário ao auth-server."""
+        return f'Bearer {self.access_token}' if self.access_token else None
 
     def __str__(self):
         return f"{self.first_name} {self.last_name} - {self.username}"
