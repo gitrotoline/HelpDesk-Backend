@@ -61,7 +61,7 @@ class TicketViewSet(viewsets.ModelViewSet):
     """CRUD de chamados. Dá list/retrieve/create/update/destroy de graça,
     com paginação, filtro (TicketFilter), busca (search_fields) e ordenação."""
 
-    queryset = Ticket.objects.all()
+    queryset = Ticket.objects.select_related("machine", "type_of_ticket", "priority", "status").all()
     serializer_class = TicketSerializer
     filterset_class = TicketFilter
     search_fields = ["subject", "description"]
@@ -124,7 +124,6 @@ class TicketViewSet(viewsets.ModelViewSet):
             f'Você foi copiado no ticket #{ticket.pk}: {ticket.subject}',
         )
 
-        # Avisa o setor atribuído (o método valida se há setor).
         self._notify_sector(ticket)
 
 

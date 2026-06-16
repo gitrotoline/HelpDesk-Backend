@@ -46,6 +46,27 @@ class TicketView(BaseView):
         ]
 
 
+class TicketPriority(models.Model):
+    name = models.CharField(max_length=80)
+
+    class Meta:
+        db_table = 'db_ticket_priority'
+        verbose_name = 'Priority of Ticket'
+        verbose_name_plural = 'Priorities of Ticket'
+
+    def __str__(self):
+        return self.name
+
+
+class TicketNotification(BaseNotification):
+    ticket = models.ForeignKey(Ticket, on_delete=models.CASCADE, related_name='notifications')
+
+    class Meta(BaseNotification.Meta):
+        db_table = 'db_ticket_notification'
+        verbose_name = 'Notification of Ticket'
+        verbose_name_plural = 'Notifications of Ticket'
+
+
 class TicketAttachment(models.Model):
     ticket = models.ForeignKey(Ticket, on_delete=models.CASCADE, related_name='attachments')
     url = models.URLField(max_length=500)
@@ -104,27 +125,6 @@ class TicketType(models.Model):
 
     def __str__(self):
         return self.name
-
-
-class TicketPriority(models.Model):
-    name = models.CharField(max_length=80)
-
-    class Meta:
-        db_table = 'db_ticket_priority'
-        verbose_name = 'Priority of Ticket'
-        verbose_name_plural = 'Priorities of Ticket'
-
-    def __str__(self):
-        return self.name
-
-
-class TicketNotification(BaseNotification):
-    ticket = models.ForeignKey(Ticket, on_delete=models.CASCADE, related_name='notifications')
-
-    class Meta(BaseNotification.Meta):
-        db_table = 'db_ticket_notification'
-        verbose_name = 'Notification of Ticket'
-        verbose_name_plural = 'Notifications of Ticket'
 
 
 class TicketLog(BaseLog):
