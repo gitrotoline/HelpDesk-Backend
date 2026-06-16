@@ -9,13 +9,13 @@ class UserListView(APIView):
     def get(self, request):
         return Response(list_users(
             params=request.query_params.dict(),
-            auth_header=request.headers.get("Authorization"),
+            auth_header=request.user.auth_header,
         ))
 
 
 class UserDetailView(APIView):
     def get(self, request, user_id):
-        user = fetch_user(user_id, auth_header=request.headers.get("Authorization"))
+        user = fetch_user(user_id, auth_header=request.user.auth_header)
         if user is None:
             return Response({"detail": "Usuário não encontrado."}, status=status.HTTP_404_NOT_FOUND)
         return Response(user)
