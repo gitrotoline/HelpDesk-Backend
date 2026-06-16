@@ -1,6 +1,16 @@
 from rest_framework import serializers
 
-from .models import Machine, MachineModelSize
+from .models import (
+    Machine,
+    MachineArm,
+    MachineCar,
+    MachineLanguage,
+    MachineModel,
+    MachineModelSize,
+    MachineOptional,
+    MachineSize,
+    MachineVoltage,
+)
 
 
 class MachineModelSizeSerializer(serializers.ModelSerializer):
@@ -21,5 +31,51 @@ class MachineSerializer(serializers.ModelSerializer):
         model = Machine
         # TODO: liste os campos explicitamente em vez de "__all__".
         fields = "__all__"
-        # Campos preenchidos pelo servidor, nunca pelo cliente:
-        read_only_fields = ["created_at", "updated_at"]
+        # Campos preenchidos pelo servidor, nunca pelo cliente. user_id = dono,
+        # setado no perform_create a partir do token (ver MachineViewSet).
+        read_only_fields = ["user_id", "created_at", "updated_at"]
+
+
+# --- Lookups (dropdowns) ---
+
+class MachineOptionalSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MachineOptional
+        fields = ["id", "name", "user_id", "created_at", "updated_at"]
+        read_only_fields = ["user_id", "created_at", "updated_at"]
+
+
+class MachineModelSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MachineModel
+        fields = ["id", "name"]
+
+
+class MachineVoltageSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MachineVoltage
+        fields = ["id", "name"]
+
+
+class MachineLanguageSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MachineLanguage
+        fields = ["id", "name"]
+
+
+class MachineArmSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MachineArm
+        fields = ["id", "name"]
+
+
+class MachineCarSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MachineCar
+        fields = ["id", "name"]
+
+
+class MachineSizeSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MachineSize
+        fields = ["id", "name"]
