@@ -53,8 +53,21 @@ class TicketExemploViewSet(viewsets.ModelViewSet):
     ordering_fields = ["name", "created_at"]
     ordering = ["name"]
 ```
-- Dono do recurso na criação: `serializer.save(user_id=self.request.user.id, ...)`
-  em `perform_create`.
+**⚠️ Dono do recurso (`user_id`) — gap recorrente:** se o model tem `user_id` do dono,
+o ViewSet **tem** que setá-lo a partir do token no `perform_create` **e** o serializer
+**tem** que marcá-lo `read_only`. Sem isso: se `user_id` é NOT NULL a criação quebra
+(`IntegrityError`); se é gravável, o cliente forja o dono (spoof).
+
+```python
+# views.py
+def perform_create(self, serializer):
+    serializer.save(user_id=self.request.user.id)
+
+# serializer.py
+read_only_fields = ["user_id", "created_at", "updated_at"]
+```
+(Cadastro compartilhado — ex.: `Enterprise` — não tem dono e dispensa isso.)
+
 - Chamada ao auth-server (listar usuários/setor): passar o token do usuário com
   `self.request.user.auth_header` — ver `sector/services.py`, `users/services.py`.
 
@@ -69,7 +82,10 @@ Se o app é novo, garantir o include em `backend/api_urls.py`:
 path('<app>/', include("<app>.urls")),
 ```
 
-## 5. Admin — `<app>/admin.py`
+## 5. Admin — `<app>/admin.py` (NÃO ESQUEÇA — gap recorrente)
+
+Registrar **todos** os models do app, inclusive os lookups. Apps já ficaram com o
+`admin.py` vazio (`# Register your models here.`) por esquecimento — sempre conferir.
 
 ```python
 @admin.register(TicketExemplo)
@@ -80,6 +96,9 @@ class TicketExemploAdmin(admin.ModelAdmin):
 ```
 
 ## 6. Filtro (opcional) — `<app>/filter.py`
+
+Se for filtrar, prefira um `FilterSet` dedicado em `filter.py` + `filterset_class` no
+viewset (padrão de `tickets`/`machines`) em vez de `filterset_fields` inline na view.
 
 ```python
 class TicketExemploFilter(django_filters.FilterSet):
@@ -93,6 +112,15 @@ E no viewset: `filterset_class = TicketExemploFilter`.
 
 `python manage.py makemigrations && python manage.py migrate`. Em fase de
 desenvolvimento com mudança de schema ampla, use a skill **/reseta**.
+
+## Checklist (pegadinhas comuns)
+
+- [ ] Model com `db_table = 'db_<app>_<entidade>'` e classe com prefixo do app.
+- [ ] Tem `user_id` de dono? → `perform_create` seta do token **e** serializer marca `read_only`.
+- [ ] **Admin**: todos os models registrados (não deixar o `admin.py` vazio).
+- [ ] Rotas nomeadas/lookups registradas **antes** da rota `""`.
+- [ ] App novo incluído no `backend/api_urls.py`.
+- [ ] Filtro (se houver) via `filter.py` + `filterset_class`.
 
 ## Conferir
 
