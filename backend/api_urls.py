@@ -5,9 +5,11 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('auth/', include("authentication.urls")),
     path('core/', include("core.urls")),
+    path('departments/', include("department.urls")),
     path('enterprises/', include("enterprises.urls")),
     path('users/', include("users.urls")),
     path('sectors/', include("sector.urls")),
     path('tickets/', include("tickets.urls")),
     path('machines/', include("machines.urls")),
+    path('notifications/', include("notifications.urls")),
 ]

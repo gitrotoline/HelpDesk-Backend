@@ -47,7 +47,8 @@ INSTALLED_APPS = [
     "core",
     "tickets",
     "machines",
-    "enterprises"
+    "enterprises",
+    "notifications"
 ]
 
 REST_FRAMEWORK = {
