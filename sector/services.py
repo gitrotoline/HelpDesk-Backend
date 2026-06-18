@@ -1,31 +1,23 @@
 import logging
 
 import requests
-from django.conf import settings
+
+from core.services import DEFAULT_TIMEOUT, base_url, headers
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TIMEOUT = 5
 
-
-def _base_url() -> str:
-    return getattr(settings, 'AUTH_SERVER_URL', '').rstrip('/')
-
-
-def _headers(auth_header: str | None = None) -> dict:
-    return {'Authorization': auth_header} if auth_header else {}
-
-
-def list_sectors(auth_header: str | None = None) -> list | dict:
+def list_sectors(params: dict | None = None, auth_header: str | None = None) -> list | dict:
     """Lista os setores do auth-server (GET /sectors/). Pass-through do corpo.
 
-    Em erro/rede devolve [] — a UI degrada com um dropdown vazio em vez de
-    quebrar. O `auth_header` é repassado do request do usuário (opção B).
+    `params` é repassado como query string (filtro/paginação) — a UI decide o
+    que enviar. Em erro/rede devolve [] — a UI degrada com um dropdown vazio em
+    vez de quebrar. O `auth_header` é repassado do request do usuário (opção B).
     """
-    url = f'{_base_url()}/sectors/'
+    url = f'{base_url()}/sectors/'
 
     try:
-        r = requests.get(url, headers=_headers(auth_header), timeout=DEFAULT_TIMEOUT)
+        r = requests.get(url, headers=headers(auth_header), params=params or {}, timeout=DEFAULT_TIMEOUT)
     except requests.RequestException as exc:
         logger.warning('list_sectors falhou: %s', exc)
         return []
@@ -37,6 +29,51 @@ def list_sectors(auth_header: str | None = None) -> list | dict:
     return r.json()
 
 
+def _write_sector(
+    method: str,
+    url: str,
+    auth_header: str | None = None,
+    json: dict | None = None,
+) -> tuple[int, object]:
+    """Proxy de escrita ao auth-server. Devolve (status_code, corpo).
+
+    Diferente do `list_sectors`, NÃO engole o erro: a UI precisa do status e da
+    mensagem reais para exibir ao usuário. Em erro de rede devolve 502 + detalhe.
+    """
+    try:
+        r = requests.request(
+            method,
+            url,
+            headers=headers(auth_header),
+            json=json,
+            timeout=DEFAULT_TIMEOUT,
+        )
+    except requests.RequestException as exc:
+        logger.warning('_write_sector %s %s falhou: %s', method, url, exc)
+        return 502, {'detail': 'Não foi possível conectar ao servidor de autenticação.'}
+
+    try:
+        body = r.json() if r.content else None
+    except ValueError:
+        body = None
+    return r.status_code, body
+
+
+def create_sector(data: dict, auth_header: str | None = None) -> tuple[int, object]:
+    """Cria um setor no auth-server (POST /sectors/)."""
+    return _write_sector('post', f'{base_url()}/sectors/', auth_header, json=data)
+
+
+def update_sector(sector_id, data: dict, auth_header: str | None = None) -> tuple[int, object]:
+    """Atualiza um setor no auth-server (PATCH /sectors/<id>/)."""
+    return _write_sector('patch', f'{base_url()}/sectors/{sector_id}/', auth_header, json=data)
+
+
+def delete_sector(sector_id, auth_header: str | None = None) -> tuple[int, object]:
+    """Remove um setor no auth-server (DELETE /sectors/<id>/)."""
+    return _write_sector('delete', f'{base_url()}/sectors/{sector_id}/', auth_header)
+
+
 def list_sector_user_ids(sector_id, auth_header: str | None = None) -> list:
     """Retorna os user_ids dos usuários de um setor (GET /users/?sector_id=).
 
@@ -46,13 +83,13 @@ def list_sector_user_ids(sector_id, auth_header: str | None = None) -> list:
     if not sector_id:
         return []
 
-    url = f'{_base_url()}/users/'
+    url = f'{base_url()}/users/'
     params = {'sector_id': str(sector_id)}
     user_ids = []
 
     try:
         while url:
-            r = requests.get(url, headers=_headers(auth_header), params=params, timeout=DEFAULT_TIMEOUT)
+            r = requests.get(url, headers=headers(auth_header), params=params, timeout=DEFAULT_TIMEOUT)
             if r.status_code != 200:
                 logger.warning('list_sector_user_ids(%s) retornou status %s', sector_id, r.status_code)
                 break
