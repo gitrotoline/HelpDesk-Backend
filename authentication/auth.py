@@ -10,17 +10,14 @@ prevalecem quando ambos estão presentes — JWT é a fonte de verdade pra auth.
 """
 
 
-class _SetorStub:
-    def __init__(self, data):
-        if isinstance(data, dict):
-            self.id = data.get('id')
-            self.nome = data.get('name') or data.get('nome')
-        else:
-            self.id = None
-            self.nome = data
+class _Sector:
+    """Setor do usuário (vindo do JWT). Expõe `id` e `name`."""
+    def __init__(self, id=None, name=None):
+        self.id = id
+        self.name = name
 
     def __str__(self):
-        return self.nome or ''
+        return self.name or ''
 
 class _Schedule:
     def __init__(self, data):
@@ -123,7 +120,15 @@ class RemoteUser:
         self.is_superuser = merged.get('is_superuser', False)
 
         self.departamento = _DepartamentoStub(merged['department']) if merged.get('department') else None
-        self.setor = _SetorStub(merged['sector']) if merged.get('sector') else None
+        # Setor: aceita tanto um objeto {"id","name"} quanto os claims planos
+        # sector_id / sector_name. None se o token não trouxer setor.
+        _sector = merged.get('sector')
+        if isinstance(_sector, dict):
+            self.sector = _Sector(_sector.get('id'), _sector.get('name') or _sector.get('nome'))
+        elif merged.get('sector_id'):
+            self.sector = _Sector(merged.get('sector_id'), merged.get('sector_name'))
+        else:
+            self.sector = None
         self.escala = _Schedule(merged['schedule']) if merged.get('schedule') else None
         self.groups = _GroupsManager(merged.get('groups', []))
         self._permissions = set(merged.get('permissions', []))

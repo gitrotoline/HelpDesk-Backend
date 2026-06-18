@@ -55,7 +55,7 @@ def me_view(request):
         "is_staff": user.is_staff,
         "is_superuser": user.is_superuser,
         "department": {"id": user.departamento.id, "name": user.departamento.nome} if user.departamento else None,
-        "sector": {"id": user.setor.id, "name": user.setor.nome} if user.setor else None,
+        "sector": {"id": user.sector.id, "name": user.sector.name} if user.sector else None,
         "schedule": {"id": user.escala.id, "name": user.escala.nome} if user.escala else None,
         "groups": user.groups.values_list("name", flat=True),
         "permissions": user.permissions,
