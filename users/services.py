@@ -4,22 +4,15 @@ import logging
 from django.conf import settings
 from django.core.cache import cache
 
+from core.services import DEFAULT_TIMEOUT, base_url, headers
+
 logger = logging.getLogger(__name__)
 
 CACHE_KEY_USER = 'auth:user:{uuid}'
-DEFAULT_TIMEOUT = 5
 
 
 def _ttl() -> int:
     return getattr(settings, 'AUTH_SERVER_USER_CACHE_TTL', 900)
-
-
-def _base_url() -> str:
-    return getattr(settings, 'AUTH_SERVER_URL', '').rstrip('/')
-
-
-def _headers(auth_header: str | None = None) -> dict:
-    return {'Authorization': auth_header} if auth_header else {}
 
 
 def fetch_user(user_uuid, auth_header: str | None = None) -> dict | None:
@@ -40,10 +33,10 @@ def fetch_user(user_uuid, auth_header: str | None = None) -> dict | None:
     if cached is not None:
         return cached
 
-    url = f'{_base_url()}/users/{uuid_str}/'
+    url = f'{base_url()}/users/{uuid_str}/'
 
     try:
-        r = requests.get(url, headers=_headers(auth_header), timeout=DEFAULT_TIMEOUT)
+        r = requests.get(url, headers=headers(auth_header), timeout=DEFAULT_TIMEOUT)
     except requests.RequestException as exc:
         logger.warning('fetch_user(%s) falhou: %s', uuid_str, exc)
         return None
@@ -64,10 +57,10 @@ def _empty_page() -> dict:
 
 
 def list_users(params: dict | None = None, auth_header: str | None = None) -> dict:
-    url = f'{_base_url()}/users/'
+    url = f'{base_url()}/users/'
 
     try:
-        r = requests.get(url, headers=_headers(auth_header), params=params or {}, timeout=DEFAULT_TIMEOUT)
+        r = requests.get(url, headers=headers(auth_header), params=params or {}, timeout=DEFAULT_TIMEOUT)
     except requests.RequestException as exc:
         logger.warning('list_users falhou: %s', exc)
         return _empty_page()
