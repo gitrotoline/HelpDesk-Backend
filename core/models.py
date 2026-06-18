@@ -5,7 +5,7 @@ class BaseNotification(models.Model):
     """Base abstrata de notificação ligada a um recurso. Cada linha pertence a
     UM destinatário (recipient_id) e guarda quem disparou a ação (actor_id /
     actor_name) só para exibição. O estado de leitura mora na própria linha.
-    Herde e adicione a FK do recurso. Ex.: TicketNotification."""
+    Herde e adicione o que faltar. Ex.: Notification (app notifications)."""
 
     recipient_id = models.UUIDField()          # quem RECEBE (roteia o feed)
     actor_id = models.UUIDField()              # quem FEZ a ação
