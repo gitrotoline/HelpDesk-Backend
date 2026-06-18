@@ -1,16 +1,15 @@
 from django.core.cache import cache
-from django.db.models import Avg, Count, DurationField, ExpressionWrapper, F
+from django.db.models import Avg, Count, DurationField, Exists, ExpressionWrapper, F, OuterRef, Q
 from django.utils import timezone
 from rest_framework import status as http_status
 from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
-from sector.services import list_sector_user_ids
+from notifications.services import notify, notify_sector
 
 from .models import (
     TicketLog,
-    TicketNotification,
     TicketPriority,
     TicketStatus,
     Ticket,
@@ -19,7 +18,6 @@ from .models import (
 )
 from .serializer import (
     TicketSerializer,
-    TicketNotificationSerializer,
     TicketPrioritySerializer,
     TicketStatusSerializer,
     TicketTypeSerializer,
@@ -68,6 +66,24 @@ class TicketViewSet(viewsets.ModelViewSet):
     ordering_fields = ["created_at", "priority"]
     ordering = ["-created_at"]
 
+    def get_queryset(self):
+        user = self.request.user
+        user_id = user.id
+        qs = super().get_queryset()
+
+        if not user.has_perm('user.tier_admin'):
+            scope = Q(user_id=user_id) | Q(recipients__user_id=user_id)
+            # setor vem do JWT (RemoteUser.sector); pode ser None se o usuário não tem.
+            if user.sector and user.sector.id:
+                scope |= Q(sector_id=user.sector.id)
+            qs = qs.filter(scope)
+        # is_viewed = se EU já abri este ticket. Exists numa subquery evita N+1.
+        # distinct() porque o JOIN com recipients pode repetir o mesmo ticket.
+        return qs.annotate(
+            is_viewed=Exists(
+                TicketView.objects.filter(ticket=OuterRef('pk'), user_id=user_id)
+            )
+        ).distinct()
 
     def retrieve(self, request, *args, **kwargs):
         # Abrir o ticket registra a visualização do usuário (idempotente).
@@ -76,32 +92,15 @@ class TicketViewSet(viewsets.ModelViewSet):
         return Response(self.get_serializer(instance).data)
 
 
-    def _notify(self, ticket, user_ids, message):
-        # 1 notificação por destinatário (sem duplicar). actor_id/actor_name = quem disparou a ação, só p/ exibição.
-        actor = self.request.user
-        recipients = {str(uid) for uid in user_ids}
-        TicketNotification.objects.bulk_create(
-            TicketNotification(
-                ticket=ticket,
-                recipient_id=uid,
-                actor_id=actor.id,
-                actor_name=actor.get_full_name(),
-                message=message,
-            )
-            for uid in recipients
-        )
-
-
     def _notify_sector(self, ticket):
-        # Fan-out: se houver setor, resolve os membros no auth-server (forwarda o
-        # token do usuário, igual aos proxies) e gera 1 notificação por pessoa.
-        if not ticket.sector_id:
-            return
-        member_ids = list_sector_user_ids(ticket.sector_id, self.request.user.auth_header)
-        self._notify(
-            ticket,
-            member_ids,
+        # Fan-out p/ o setor do ticket via service unificado (best-effort).
+        notify_sector(
+            ticket.sector_id,
+            'ticket',
+            ticket.pk,
             f'Ticket #{ticket.pk} atribuído ao setor {ticket.sector_name}',
+            self.request.user,
+            self.request.user.auth_header,
         )
 
 
@@ -111,6 +110,8 @@ class TicketViewSet(viewsets.ModelViewSet):
             user_id=self.request.user.id,
             user_name=self.request.user.get_full_name(),
         )
+        # Quem cria já viu o ticket: registra a visualização do criador (idempotente).
+        TicketView.objects.get_or_create(ticket=ticket, user_id=self.request.user.id)
         TicketLog.objects.create(
             ticket=ticket,
             user_id=self.request.user.id,
@@ -118,10 +119,12 @@ class TicketViewSet(viewsets.ModelViewSet):
             action='Ticket criado',
         )
         # Avisa quem foi colocado em cópia no chamado.
-        self._notify(
-            ticket,
+        notify(
             ticket.recipients.values_list('user_id', flat=True),
+            'ticket',
+            ticket.pk,
             f'Você foi copiado no ticket #{ticket.pk}: {ticket.subject}',
+            self.request.user,
         )
 
         self._notify_sector(ticket)
@@ -143,7 +146,7 @@ class TicketViewSet(viewsets.ModelViewSet):
             action=log_action,
         )
         # Avisa o dono do ticket quando outra pessoa o altera.
-        self._notify(ticket, [ticket.user_id], f'Ticket #{ticket.pk} foi atualizado')
+        notify([ticket.user_id], 'ticket', ticket.pk, f'Ticket #{ticket.pk} foi atualizado', self.request.user)
         # Avisa o setor só quando ele muda (o método valida se há setor).
         if ticket.sector_id != old_sector_id:
             self._notify_sector(ticket)
@@ -183,7 +186,7 @@ class TicketViewSet(viewsets.ModelViewSet):
             user_name=request.user.get_full_name(),
             action='Ticket fechado',
         )
-        self._notify(ticket, [ticket.user_id], f'Ticket #{ticket.pk} foi fechado')
+        notify([ticket.user_id], 'ticket', ticket.pk, f'Ticket #{ticket.pk} foi fechado', request.user)
         return Response(self.get_serializer(ticket).data)
 
 
@@ -213,7 +216,7 @@ class TicketViewSet(viewsets.ModelViewSet):
             user_name=request.user.get_full_name(),
             action='Ticket reaberto',
         )
-        self._notify(ticket, [ticket.user_id], f'Ticket #{ticket.pk} foi reaberto')
+        notify([ticket.user_id], 'ticket', ticket.pk, f'Ticket #{ticket.pk} foi reaberto', request.user)
         return Response(self.get_serializer(ticket).data)
 
 
@@ -249,32 +252,3 @@ class TicketViewSet(viewsets.ModelViewSet):
             }
             cache.set('tickets_stats', data, timeout=300)
         return Response(data)
-
-
-class TicketNotificationViewSet(viewsets.ReadOnlyModelViewSet):
-    """Notificações do usuário autenticado.
-    GET /notifications/ lista;
-    GET /notifications/unread/ conta as não lidas;
-    POST /notifications/{id}/read/ marca como visualizada."""
-
-    serializer_class = TicketNotificationSerializer
-
-    def get_queryset(self):
-        # Notificações endereçadas a mim.
-        return TicketNotification.objects.filter(recipient_id=self.request.user.id)
-
-    @action(detail=True, methods=['post'])
-    def read(self, request, pk=None):
-        # Marcar como lida = marcar na própria linha (idempotente).
-        notification = self.get_object()
-        if not notification.is_read:
-            notification.is_read = True
-            notification.read_at = timezone.now()
-            notification.save(update_fields=['is_read', 'read_at'])
-        return Response(self.get_serializer(notification).data)
-
-    @action(detail=False, methods=['get'])
-    def unread(self, request):
-        # Não lidas = minhas notificações ainda não marcadas como lidas.
-        count = self.get_queryset().filter(is_read=False).count()
-        return Response({'unread': count})

@@ -2,7 +2,6 @@ from django.contrib import admin
 
 from .models import (
     TicketLog,
-    TicketNotification,
     TicketPriority,
     TicketView,
     TicketStatus,
@@ -62,13 +61,6 @@ class TicketLogAdmin(admin.ModelAdmin):
 
     def has_change_permission(self, request, obj=None):
         return False
-
-
-@admin.register(TicketNotification)
-class TicketNotificationAdmin(admin.ModelAdmin):
-    list_display = ('ticket', 'recipient_id', 'actor_name', 'message', 'is_read', 'created_at')
-    list_filter = ('is_read', 'created_at')
-    search_fields = ('message',)
 
 
 @admin.register(TicketView)

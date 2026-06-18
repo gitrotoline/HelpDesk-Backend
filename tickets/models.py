@@ -1,6 +1,6 @@
 from django.db import models
 
-from core.models import BaseLog, BaseNotification, BaseView
+from core.models import BaseLog, BaseView
 from machines.models import Machine
 
 
@@ -56,15 +56,6 @@ class TicketPriority(models.Model):
 
     def __str__(self):
         return self.name
-
-
-class TicketNotification(BaseNotification):
-    ticket = models.ForeignKey(Ticket, on_delete=models.CASCADE, related_name='notifications')
-
-    class Meta(BaseNotification.Meta):
-        db_table = 'db_ticket_notification'
-        verbose_name = 'Notification of Ticket'
-        verbose_name_plural = 'Notifications of Ticket'
 
 
 class TicketAttachment(models.Model):

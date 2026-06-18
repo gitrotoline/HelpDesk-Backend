@@ -1,7 +1,6 @@
 from rest_framework import serializers
 
 from .models import (
-    TicketNotification,
     TicketPriority,
     TicketStatus,
     Ticket,
@@ -29,25 +28,20 @@ class TicketStatusSerializer(serializers.ModelSerializer):
 
 
 class TicketSerializer(serializers.ModelSerializer):
-    # user_ids das pessoas em cópia; viram TicketRecipient no create/update.
-    recipients = serializers.ListField(
-        child=serializers.UUIDField(), write_only=True, required=False
-    )
-    # Setor do chamado: o front manda `sector` (UUID) + `sector_name`. O id é
-    # gravado em Ticket.sector_id; na leitura sai como `sector_id`/`sector_name`.
+    recipients = serializers.ListField(child=serializers.UUIDField(), write_only=True, required=False)
     sector = serializers.UUIDField(write_only=True, required=False, allow_null=True)
-    # Rótulos derivados dos FKs (somente leitura), para a tabela do front
-    # exibir nomes sem fazer lookup id->nome no cliente.
     type_of_ticket_name = serializers.CharField(source="type_of_ticket.name", read_only=True)
     priority_name = serializers.CharField(source="priority.name", read_only=True)
     status_name = serializers.CharField(source="status.name", read_only=True)
     machine_serial = serializers.CharField(source="machine.serial_number", read_only=True)
+    is_viewed = serializers.SerializerMethodField()
+
+    def get_is_viewed(self, obj):
+        return getattr(obj, 'is_viewed', False)
 
     class Meta:
         model = Ticket
-        # TODO: liste os campos explicitamente em vez de "__all__".
         fields = "__all__"
-        # Campos preenchidos pelo servidor, nunca pelo cliente:
         read_only_fields = ["user_id", "user_name", "sector_id", "created_at", "updated_at", "closed_at"]
 
     def _sync_recipients(self, ticket, recipients):
@@ -76,9 +70,3 @@ class TicketSerializer(serializers.ModelSerializer):
         if recipients is not None:
             self._sync_recipients(ticket, recipients)
         return ticket
-
-
-class TicketNotificationSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = TicketNotification
-        fields = "__all__"
