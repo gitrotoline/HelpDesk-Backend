@@ -1,5 +1,7 @@
 from rest_framework import viewsets
 
+from notifications.services import notify
+
 from .models import (
     Machine,
     MachineArm,
@@ -39,7 +41,17 @@ class MachineViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         # user_id = dono (RemoteUser do auth-server), setado do token — nunca do cliente.
-        serializer.save(user_id=self.request.user.id)
+        machine = serializer.save(user_id=self.request.user.id)
+        # Notifica no feed unificado (mesmo padrão dos tickets). category='machine'.
+        # TODO(produto): definir os destinatários reais (setor responsável / admins).
+        # Por ora avisa o próprio criador, só para demonstrar o fluxo ponta a ponta.
+        notify(
+            [self.request.user.id],
+            'machine',
+            machine.pk,
+            f'Máquina {machine.serial_number or machine.pk} cadastrada',
+            self.request.user,
+        )
 
 
 class MachineModelSizeViewSet(viewsets.ModelViewSet):
