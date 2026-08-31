@@ -218,3 +218,46 @@ class RelatedTicketsTests(APITestCase):
         self.assertEqual(item['comments_count'], 1)
         # O campo cru continua existindo — é o que o formulário grava.
         self.assertEqual(resp.data['mentions'], [self.related.id])
+
+    def test_detail_returns_mentioned_in_detail(self):
+        # Direção inversa: outro chamado menciona este. A M2M é symmetrical=False,
+        # então sem o campo novo essa relação é invisível na API.
+        other = Ticket.objects.create(
+            user_id=OWNER_ID, subject='Chamado que cita', type_of_ticket=self.ttype,
+            priority=self.prio, status=self.status_open,
+        )
+        other.mentions.add(self.ticket)
+        resp = self.client.get(reverse('ticket-detail', args=[self.ticket.id]))
+        self.assertEqual(
+            [i['id'] for i in resp.data['mentioned_in_detail']], [other.id]
+        )
+
+    def test_related_out_of_scope_is_hidden_but_pk_still_listed(self):
+        # Chamado de outro usuário, sem setor e sem cópia: fora do escopo.
+        secret = Ticket.objects.create(
+            user_id=OTHER_ID, subject='Sigiloso', type_of_ticket=self.ttype,
+            priority=self.prio, status=self.status_open,
+        )
+        self.ticket.mentions.add(secret)
+        resp = self.client.get(reverse('ticket-detail', args=[self.ticket.id]))
+        subjects = [i['subject'] for i in resp.data['mentions_detail']]
+        self.assertNotIn('Sigiloso', subjects)          # assunto não vaza
+        self.assertIn(secret.id, resp.data['mentions'])  # o pk continua (comportamento antigo)
+
+    def test_admin_sees_related_out_of_scope(self):
+        secret = Ticket.objects.create(
+            user_id=OTHER_ID, subject='Sigiloso', type_of_ticket=self.ttype,
+            priority=self.prio, status=self.status_open,
+        )
+        self.ticket.mentions.add(secret)
+        self.client.force_authenticate(
+            user=make_user(user_id=OTHER_ID, permissions=['user.tier_admin'])
+        )
+        resp = self.client.get(reverse('ticket-detail', args=[self.ticket.id]))
+        subjects = [i['subject'] for i in resp.data['mentions_detail']]
+        self.assertIn('Sigiloso', subjects)
+
+    def test_list_does_not_include_related_fields(self):
+        resp = self.client.get(reverse('ticket-list'))
+        self.assertNotIn('mentions_detail', resp.data['results'][0])
+        self.assertNotIn('mentioned_in_detail', resp.data['results'][0])

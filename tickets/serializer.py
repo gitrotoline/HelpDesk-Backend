@@ -163,6 +163,10 @@ class TicketDetailSerializer(TicketSerializer):
     """TicketSerializer + os relacionados. Usado só no retrieve (ver views.py):
     os dois campos custam 2 queries por objeto, o que na listagem seria N+1."""
     mentions_detail = serializers.SerializerMethodField()
+    # Direção inversa da M2M (symmetrical=False, related_name='mentioned_in'
+    # no models.py): quem cita este chamado. Sem este campo essa relação fica
+    # invisível na API, já que `mentions` só anda em um sentido (B -> A).
+    mentioned_in_detail = serializers.SerializerMethodField()
 
     def _related(self, manager):
         # Filtra pela MESMA regra de visibilidade dos chamados: sem isso, a
@@ -179,3 +183,7 @@ class TicketDetailSerializer(TicketSerializer):
 
     def get_mentions_detail(self, obj):
         return self._related(obj.mentions)
+
+    def get_mentioned_in_detail(self, obj):
+        # related_name da M2M para self (ver Ticket.mentions no models.py).
+        return self._related(obj.mentioned_in)
