@@ -15,6 +15,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from core.s3 import get_object_stream, upload_fileobj
+from notifications.models import Notification
 from notifications.services import notify, notify_sector
 from sector.services import list_department_sectors
 
