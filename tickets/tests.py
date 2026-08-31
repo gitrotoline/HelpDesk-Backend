@@ -448,7 +448,10 @@ class DepartmentSectorsServiceTests(APITestCase):
 
 
 class TicketWatcherApiTests(APITestCase):
-    DEPT = '55555555-5555-5555-5555-555555555555'
+    # Precisa ter letra hexadecimal (a-f) para que .upper() no teste de UUID
+    # maiúsculo realmente mude a string — um UUID só com dígitos (ex.: puro
+    # '5555...') é idêntico em maiúsculas e minúsculas e não prova nada.
+    DEPT = 'dddddddd-dddd-dddd-dddd-dddddddddddd'
     SEC_A = 'aaaaaaa1-0000-0000-0000-000000000001'
     SEC_B = 'aaaaaaa1-0000-0000-0000-000000000002'
 

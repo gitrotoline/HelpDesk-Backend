@@ -422,20 +422,25 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
         # IMPORTANT 1: target_id vem do request e cai direto num UUIDField no
         # get_or_create — sem validar o formato, um valor inválido estoura na
         # montagem da query (500) em vez de devolver um 400 claro.
+        #
+        # Guardamos o uuid.UUID já normalizado (target_uuid) e usamos SÓ ele daqui
+        # em diante — nunca a string crua do request. str(uuid.UUID(...)) é sempre
+        # minúsculo/com hífens, então o valor persistido e o source_ref derivado
+        # ficam consistentes independente de como o cliente mandou o UUID.
         try:
-            uuid.UUID(str(target_id))
+            target_uuid = uuid.UUID(str(target_id))
         except (ValueError, AttributeError, TypeError):
             return Response({'detail': 'target_id precisa ser um UUID válido.'},
                             status=http_status.HTTP_400_BAD_REQUEST)
 
         if kind == TicketWatcher.KIND_SECTOR:
-            self._upsert_sector_watcher(ticket, target_id, request.data.get('target_name', ''),
+            self._upsert_sector_watcher(ticket, target_uuid, request.data.get('target_name', ''),
                                         TicketWatcher.ORIGIN_MANUAL, '')
         else:
             # None = não deu para consultar; [] = departamento sem setor ativo.
             # Tratar os dois como vazio gravaria zero acompanhantes com resposta
             # de sucesso, e o usuário acharia que deu acesso ao departamento.
-            sectors = list_department_sectors(target_id, request.user.auth_header)
+            sectors = list_department_sectors(target_uuid, request.user.auth_header)
             if sectors is None:
                 return Response(
                     {'detail': 'Não foi possível consultar os setores do departamento.'},
@@ -449,20 +454,33 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
             # um erro no meio do loop deixaria estado parcial (departamento sem
             # todos os setores, ou setores órfãos).
             with transaction.atomic():
-                # IMPORTANT 2: usa o target_id devolvido pelo próprio get_or_create
-                # (forma canônica do UUIDField: minúscula, com hífens) como source_ref
-                # dos setores derivados — não a string crua que o cliente mandou. Do
-                # contrário, um UUID em maiúsculas/sem hífens no POST faz o DELETE
-                # (que compara com str(watcher.target_id), sempre canônico) não bater,
-                # deixando os setores derivados como lixo inalcançável pela UI.
+                # IMPORTANT 2: source_ref dos setores derivados precisa ser a forma
+                # canônica do UUID do departamento, para o DELETE em remove_watcher
+                # (que compara com str(watcher.target_id)) bater depois.
+                #
+                # ATENÇÃO: dept_row.target_id NÃO serve para isso quando a linha é
+                # CRIADA agora pelo get_or_create — nesse caminho o Django mantém em
+                # memória exatamente o valor atribuído (aqui, target_uuid), sem
+                # normalizar; a conversão do UUIDField para uuid.UUID canônico só
+                # acontece quando a linha é LIDA do banco (to_python no from_db).
+                # Como já normalizamos manualmente acima (target_uuid), usamos ele
+                # direto — não dept_row.target_id — e o resultado é canônico nos
+                # dois casos (linha nova ou já existente).
                 dept_row, _ = TicketWatcher.objects.get_or_create(
-                    ticket=ticket, kind=TicketWatcher.KIND_DEPARTMENT, target_id=target_id,
+                    ticket=ticket, kind=TicketWatcher.KIND_DEPARTMENT, target_id=target_uuid,
                     defaults={'target_name': request.data.get('target_name', ''),
                               'origin': TicketWatcher.ORIGIN_MANUAL},
                 )
-                dept_source_ref = str(dept_row.target_id)
+                dept_source_ref = str(target_uuid)
                 for sector in sectors:
-                    self._upsert_sector_watcher(ticket, sector['id'], sector.get('name', ''),
+                    # Id vindo do auth-server: serviço externo, não confiável o bastante
+                    # para derrubar a operação toda se vier em formato inesperado — ignora
+                    # o setor malformado e segue com os demais.
+                    try:
+                        sector_uuid = uuid.UUID(str(sector['id']))
+                    except (ValueError, AttributeError, TypeError, KeyError):
+                        continue
+                    self._upsert_sector_watcher(ticket, sector_uuid, sector.get('name', ''),
                                                 TicketWatcher.ORIGIN_DEPARTMENT, dept_source_ref)
 
         self._notify_watchers(ticket, f'Você foi incluído no chamado #{ticket.pk}')
