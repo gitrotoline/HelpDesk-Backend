@@ -2,6 +2,7 @@ from unittest.mock import patch
 
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -277,3 +278,42 @@ class RelatedTicketsTests(APITestCase):
         resp = self.client.get(reverse('ticket-list'))
         self.assertNotIn('mentions_detail', resp.data['results'][0])
         self.assertNotIn('mentioned_in_detail', resp.data['results'][0])
+
+
+class ClosedTicketCommentTests(APITestCase):
+    """Chamado fechado não recebe resposta nova — a regra vive no backend porque
+    o formulário escondido no front não impede a chamada direta da API."""
+
+    def setUp(self):
+        self.ttype = TicketType.objects.create(name='Problema')
+        self.prio = TicketPriority.objects.create(name='Alta')
+        self.status_open = TicketStatus.objects.create(name='Aberto', is_default=True)
+        self.status_done = TicketStatus.objects.create(name='Fechado', is_final=True)
+        self.client.force_authenticate(user=make_user())
+        self.list_url = reverse('ticket-comment-list')
+
+    def _ticket(self, closed_at=None, ticket_status=None):
+        # sector_id=None evita o notify_sector (que faria chamada HTTP).
+        return Ticket.objects.create(
+            user_id=OWNER_ID, subject='T', type_of_ticket=self.ttype,
+            priority=self.prio, status=ticket_status or self.status_open,
+            closed_at=closed_at,
+        )
+
+    def test_comment_on_closed_ticket_is_rejected(self):
+        ticket = self._ticket(closed_at=timezone.now(), ticket_status=self.status_done)
+        resp = self.client.post(
+            self.list_url, {'ticket': ticket.id, 'body': 'ainda da tempo?'}
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(TicketComment.objects.filter(ticket=ticket).exists())
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_comment_on_open_ticket_still_works(self, _n, _ns):
+        ticket = self._ticket()
+        resp = self.client.post(
+            self.list_url, {'ticket': ticket.id, 'body': 'segue o retorno'}
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(TicketComment.objects.filter(ticket=ticket).exists())

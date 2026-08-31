@@ -408,6 +408,14 @@ class TicketCommentViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
 
 
     def perform_create(self, serializer):
+        # Chamado fechado não recebe resposta nova: para responder, reabra
+        # (POST /tickets/{id}/reopen/). Checado ANTES do save — o front esconde
+        # o formulário, mas a server action é chamável direto do navegador.
+        ticket = serializer.validated_data.get('ticket')
+        if ticket is not None and ticket.closed_at is not None:
+            raise PermissionDenied(
+                'Este chamado está fechado. Reabra o chamado para responder.'
+            )
         comment = serializer.save(
             user_id=self.request.user.id,
             user_name=self.request.user.get_full_name(),
