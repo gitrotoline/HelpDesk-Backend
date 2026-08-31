@@ -8,6 +8,12 @@ from rest_framework.test import APITestCase
 from authentication.auth import RemoteUser
 from core.s3 import build_key
 
+from .attachments import (
+    COMMENT_ATTACHMENT_SALT,
+    TICKET_ATTACHMENT_SALT,
+    unsign_attachment_id,
+)
+
 from .models import (
     Ticket,
     TicketAttachment,
@@ -20,6 +26,14 @@ from .models import (
 
 OWNER_ID = '11111111-1111-1111-1111-111111111111'
 OTHER_ID = '22222222-2222-2222-2222-222222222222'
+
+
+def attachment_id_from_url(url, salt):
+    # A `url` é o link do proxy de download (nosso domínio); o último segmento é
+    # o token assinado. Devolve o id do anexo embutido — BadSignature se o token
+    # foi adulterado ou assinado com outro salt.
+    token = url.rstrip('/').rsplit('/', 1)[-1]
+    return unsign_attachment_id(token, salt)
 
 
 def make_user(user_id=OWNER_ID, is_superuser=False, permissions=None):
@@ -56,8 +70,7 @@ class CommentAttachmentTests(APITestCase):
         self.list_url = reverse('ticket-comment-list')
 
     @patch('tickets.views.upload_fileobj', return_value='tickets/comments/abc/file.pdf')
-    @patch('tickets.serializer.generate_download_url', return_value='https://s3/signed-get')
-    def test_create_comment_uploads_file_and_persists_key_and_name(self, _dl, _up):
+    def test_create_comment_uploads_file_and_persists_key_and_name(self, _up):
         # O arquivo vai junto no multipart; o backend faz o upload (mockado) e
         # persiste a key devolvida + o nome original do arquivo.
         upload = SimpleUploadedFile('file.pdf', b'%PDF-1.4 fake', content_type='application/pdf')
@@ -73,20 +86,24 @@ class CommentAttachmentTests(APITestCase):
         self.assertEqual(att.name, 'file.pdf')
         _up.assert_called_once()
 
-    @patch('tickets.serializer.generate_download_url', return_value='https://s3/signed-get')
-    def test_read_returns_signed_url_and_hides_key(self, _mock):
+    def test_read_returns_signed_url_and_hides_key(self):
         comment = TicketComment.objects.create(
             ticket=self.ticket, user_id=OWNER_ID, user_name='Test User', body='oi'
         )
-        TicketCommentAttachment.objects.create(
+        att = TicketCommentAttachment.objects.create(
             comment=comment, key='tickets/comments/abc/file.pdf', name='file.pdf'
         )
         resp = self.client.get(self.list_url, {'ticket': self.ticket.id})
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         attachment = resp.data['results'][0]['attachments'][0]
-        self.assertEqual(attachment['url'], 'https://s3/signed-get')
         self.assertEqual(attachment['name'], 'file.pdf')
         self.assertNotIn('key', attachment)  # key não é exposta na leitura
+        # A url aponta para o nosso proxy de download e o token carrega o id do anexo.
+        expected_path = reverse('comment-attachment-download', args=['x']).rsplit('/', 1)[0]
+        self.assertIn(expected_path, attachment['url'])
+        self.assertEqual(
+            attachment_id_from_url(attachment['url'], COMMENT_ATTACHMENT_SALT), att.id
+        )
 
     def test_other_user_cannot_see_comments_of_ticket_without_access(self):
         TicketComment.objects.create(
@@ -111,10 +128,9 @@ class TicketAttachmentUploadTests(APITestCase):
         self.client.force_authenticate(user=make_user())
 
     @patch('tickets.views.upload_fileobj', return_value='tickets/attachments/xyz/foto.png')
-    @patch('tickets.serializer.generate_download_url', return_value='https://s3/signed-get')
-    def test_add_attachment_uploads_file_and_hides_key(self, _dl, _up):
+    def test_add_attachment_uploads_file_and_hides_key(self, _up):
         # O arquivo vai no multipart (campo `file`); o backend faz o upload
-        # (mockado), persiste a key e devolve a url presigned sem expor a key.
+        # (mockado), persiste a key e devolve a url assinada sem expor a key.
         url = reverse('ticket-add-attachment', args=[self.ticket.id])
         upload = SimpleUploadedFile('foto.png', b'\x89PNG fake', content_type='image/png')
         resp = self.client.post(url, {'file': upload}, format='multipart')
@@ -122,8 +138,10 @@ class TicketAttachmentUploadTests(APITestCase):
         att = TicketAttachment.objects.get(ticket=self.ticket)
         self.assertEqual(att.key, 'tickets/attachments/xyz/foto.png')
         self.assertEqual(att.name, 'foto.png')
-        self.assertEqual(resp.data['url'], 'https://s3/signed-get')
         self.assertNotIn('key', resp.data)
+        self.assertEqual(
+            attachment_id_from_url(resp.data['url'], TICKET_ATTACHMENT_SALT), att.id
+        )
         _up.assert_called_once()
 
     def test_add_attachment_requires_file(self):
@@ -143,8 +161,7 @@ class TicketCreateWithAttachmentTests(APITestCase):
     @patch('tickets.views.notify_sector')
     @patch('tickets.views.notify')
     @patch('tickets.views.upload_fileobj', return_value='tickets/attachments/xyz/foto.png')
-    @patch('tickets.serializer.generate_download_url', return_value='https://s3/signed-get')
-    def test_create_ticket_with_file_and_recipient_multipart(self, _dl, _up, _n, _ns):
+    def test_create_ticket_with_file_and_recipient_multipart(self, _up, _n, _ns):
         # Chamado + arquivo + destinatário num único request multipart. Valida o
         # upload pelo backend e o parse das listas (recipients) em multipart.
         upload = SimpleUploadedFile('foto.png', b'\x89PNG fake', content_type='image/png')
