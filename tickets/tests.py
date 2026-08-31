@@ -18,11 +18,14 @@ from .attachments import (
     unsign_attachment_id,
 )
 
+from notifications.models import Notification
+
 from .models import (
     Ticket,
     TicketAttachment,
     TicketComment,
     TicketCommentAttachment,
+    TicketLog,
     TicketPriority,
     TicketRecipient,
     TicketStatus,
@@ -971,4 +974,53 @@ class RequesterSectorWatcherTests(APITestCase):
         created = Ticket.objects.get(subject='Novo')
         self.assertEqual(
             created.watchers.filter(origin=TicketWatcher.ORIGIN_REQUESTER).count(), 0
+        )
+
+
+class TicketDeleteNotificationsTests(APITestCase):
+    """Excluir chamado leva junto as notificações dele: elas não têm FK (category
+    + target_id são texto, para servirem a qualquer recurso), então não caem no
+    cascade e sobreviveriam como link morto no sininho. O histórico que importa
+    fica no TicketLog, que sobrevive de propósito."""
+
+    def setUp(self):
+        self.ttype = TicketType.objects.create(name='Problema')
+        self.prio = TicketPriority.objects.create(name='Alta')
+        self.status_open = TicketStatus.objects.create(name='Aberto', is_default=True)
+        self.ticket = Ticket.objects.create(
+            user_id=OWNER_ID, subject='T', type_of_ticket=self.ttype,
+            priority=self.prio, status=self.status_open,
+        )
+        self.client.force_authenticate(user=make_user())
+
+    def _notificacao(self, category, target_id):
+        return Notification.objects.create(
+            recipient_id=OWNER_ID, actor_id=OTHER_ID, actor_name='Outro',
+            category=category, target_id=str(target_id), message='msg',
+        )
+
+    def test_delete_removes_ticket_notifications(self):
+        self._notificacao('ticket', self.ticket.id)
+        self.client.delete(reverse('ticket-detail', args=[self.ticket.id]))
+        self.assertFalse(
+            Notification.objects.filter(category='ticket', target_id=str(self.ticket.id)).exists()
+        )
+
+    def test_delete_keeps_notifications_of_other_resources_with_same_id(self):
+        # target_id é texto e não diz de que recurso é: filtrar só por ele
+        # apagaria a notificação de uma máquina de mesmo id.
+        outra = self._notificacao('machine', self.ticket.id)
+        de_outro_chamado = Ticket.objects.create(
+            user_id=OWNER_ID, subject='Outro', type_of_ticket=self.ttype,
+            priority=self.prio, status=self.status_open,
+        )
+        nota_outro = self._notificacao('ticket', de_outro_chamado.id)
+        self.client.delete(reverse('ticket-detail', args=[self.ticket.id]))
+        self.assertTrue(Notification.objects.filter(pk=outra.pk).exists())
+        self.assertTrue(Notification.objects.filter(pk=nota_outro.pk).exists())
+
+    def test_delete_still_records_the_log(self):
+        self.client.delete(reverse('ticket-detail', args=[self.ticket.id]))
+        self.assertTrue(
+            TicketLog.objects.filter(action=f'Ticket #{self.ticket.id} excluído').exists()
         )

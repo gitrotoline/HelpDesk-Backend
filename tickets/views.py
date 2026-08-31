@@ -327,13 +327,25 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
     def perform_destroy(self, instance):
         self._assert_can_delete(instance)
         ticket_pk = instance.pk
-        instance.delete()
-        # Sem FK: o ticket já não existe — o número fica na action.
-        TicketLog.objects.create(
-            user_id=self.request.user.id,
-            user_name=self.request.user.get_full_name(),
-            action=f'Ticket #{ticket_pk} excluído',
-        )
+        with transaction.atomic():
+            # As notificações não têm FK para o ticket (category + target_id são
+            # texto, para servirem a qualquer recurso), então não caem no cascade
+            # e sobreviveriam apontando para um chamado que não existe mais — um
+            # link morto no sininho. O histórico que justifica guardar fica no
+            # TicketLog, que sobrevive de propósito (SET_NULL, com o número na
+            # action). Filtra por category TAMBÉM: `target_id` é string e não diz
+            # de que recurso é, então sem isso a notificação de uma máquina de
+            # mesmo id iria junto.
+            Notification.objects.filter(
+                category='ticket', target_id=str(ticket_pk)
+            ).delete()
+            instance.delete()
+            # Sem FK: o ticket já não existe — o número fica na action.
+            TicketLog.objects.create(
+                user_id=self.request.user.id,
+                user_name=self.request.user.get_full_name(),
+                action=f'Ticket #{ticket_pk} excluído',
+            )
 
 
     @action(detail=True, methods=['post'])
