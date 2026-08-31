@@ -21,6 +21,7 @@ from .models import (
     TicketComment,
     TicketCommentAttachment,
     TicketPriority,
+    TicketRecipient,
     TicketStatus,
     TicketType,
 )
@@ -317,3 +318,51 @@ class ClosedTicketCommentTests(APITestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
         self.assertTrue(TicketComment.objects.filter(ticket=ticket).exists())
+
+
+class CommentScopeOnCreateTests(APITestCase):
+    """Escopo na ESCRITA: o get_queryset do viewset filtra só a leitura, então
+    sem checagem no perform_create qualquer autenticado comentava em qualquer
+    chamado sabendo apenas o número."""
+
+    def setUp(self):
+        self.ttype = TicketType.objects.create(name='Problema')
+        self.prio = TicketPriority.objects.create(name='Alta')
+        self.status_open = TicketStatus.objects.create(name='Aberto', is_default=True)
+        # sector_id=None evita o notify_sector (que faria chamada HTTP).
+        self.ticket = Ticket.objects.create(
+            user_id=OWNER_ID, subject='Privado', type_of_ticket=self.ttype,
+            priority=self.prio, status=self.status_open,
+        )
+        self.list_url = reverse('ticket-comment-list')
+
+    def test_outsider_cannot_comment_on_invisible_ticket(self):
+        # OTHER_ID não é dono, não está em cópia e não tem setor: não vê o chamado.
+        self.client.force_authenticate(user=make_user(user_id=OTHER_ID))
+        resp = self.client.post(
+            self.list_url, {'ticket': self.ticket.id, 'body': 'invasao'}
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(TicketComment.objects.filter(ticket=self.ticket).exists())
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_recipient_in_copy_can_comment(self, _n, _ns):
+        # Quem está em cópia vê o chamado, então continua podendo responder.
+        TicketRecipient.objects.create(ticket=self.ticket, user_id=OTHER_ID)
+        self.client.force_authenticate(user=make_user(user_id=OTHER_ID))
+        resp = self.client.post(
+            self.list_url, {'ticket': self.ticket.id, 'body': 'ajudo aqui'}
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_admin_can_comment_on_any_ticket(self, _n, _ns):
+        self.client.force_authenticate(
+            user=make_user(user_id=OTHER_ID, permissions=['user.tier_admin'])
+        )
+        resp = self.client.post(
+            self.list_url, {'ticket': self.ticket.id, 'body': 'admin passou aqui'}
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)

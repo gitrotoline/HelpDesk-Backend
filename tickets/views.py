@@ -412,6 +412,14 @@ class TicketCommentViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
         # (POST /tickets/{id}/reopen/). Checado ANTES do save — o front esconde
         # o formulário, mas a server action é chamável direto do navegador.
         ticket = serializer.validated_data.get('ticket')
+        # Escopo na ESCRITA. O get_queryset acima filtra a leitura, mas o campo
+        # `ticket` do serializer é um PrimaryKeyRelatedField com queryset de
+        # todos os chamados — sem esta checagem, qualquer autenticado comentava
+        # em qualquer chamado sabendo só o número, inclusive nos que não vê.
+        if ticket is not None and not Ticket.objects.filter(
+            pk=ticket.pk
+        ).filter(ticket_visibility_q(self.request.user)).exists():
+            raise PermissionDenied('Você não tem acesso a este chamado.')
         if ticket is not None and ticket.closed_at is not None:
             raise PermissionDenied(
                 'Este chamado está fechado. Reabra o chamado para responder.'
