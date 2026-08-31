@@ -145,13 +145,9 @@ AUTH_PASSWORD_VALIDATORS = [
 # https://docs.djangoproject.com/en/6.0/topics/i18n/
 
 LANGUAGE_CODE = "en-us"
-
-TIME_ZONE = "UTC"
-
+TIME_ZONE = 'America/Sao_Paulo'
 USE_I18N = True
-
 USE_TZ = True
-
 
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
@@ -179,3 +175,11 @@ SIMPLE_JWT = {
     "USER_ID_CLAIM": "user_id",
     "USER_ID_FIELD": "user_id",
 }
+
+# S3 — anexos (bucket privado). Upload é feito pelo backend e a leitura é por um
+# proxy de download com link permanente assinado (sem presign). Ver core/s3.py.
+# Em prod, deixe ACCESS_KEY/SECRET vazios e use IAM role (boto3 cai no provedor padrão).
+AWS_STORAGE_BUCKET_NAME = env('AWS_STORAGE_BUCKET_NAME', default='')
+AWS_S3_REGION_NAME = env('AWS_S3_REGION_NAME', default='sa-east-1')
+AWS_ACCESS_KEY_ID = env('AWS_ACCESS_KEY_ID', default='')
+AWS_SECRET_ACCESS_KEY = env('AWS_SECRET_ACCESS_KEY', default='')
