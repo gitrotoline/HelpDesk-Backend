@@ -72,3 +72,30 @@ def list_users(params: dict | None = None, auth_header: str | None = None) -> di
     # Pass-through: devolve o que o auth-server respondeu (envelope paginado
     # {count,next,previous,results} ou lista pura), sem remodelar os campos.
     return r.json()
+
+
+def _write_user(method: str,url: str,auth_header: str | None = None,json: dict | None = None,) -> tuple[int, object]:
+
+    try:
+        r = requests.request(method, url, headers=headers(auth_header), json=json, timeout=DEFAULT_TIMEOUT)
+    except requests.RequestException as exc:
+        logger.warning('_write_user %s %s falhou: %s', method, url, exc)
+        return 502, {'detail': 'Não foi possível conectar ao servidor de autenticação.'}
+
+    try:
+        body = r.json() if r.content else None
+    except ValueError:
+        body = None
+    return r.status_code, body
+
+
+def create_user(data: dict, auth_header: str | None = None) -> tuple[int, object]:
+    return _write_user('post', f'{base_url()}/users/', auth_header, json=data)
+
+
+def update_user(user_id, data: dict, auth_header: str | None = None) -> tuple[int, object]:
+    status_code, body = _write_user('patch', f'{base_url()}/users/{user_id}/', auth_header, json=data)
+
+    if 200 <= status_code < 300:
+        cache.delete(CACHE_KEY_USER.format(uuid=str(user_id)))
+    return status_code, body
