@@ -1,5 +1,6 @@
 from unittest.mock import patch
 
+import requests
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db.utils import IntegrityError
 from django.urls import reverse
@@ -9,6 +10,7 @@ from rest_framework.test import APITestCase
 
 from authentication.auth import RemoteUser
 from core.s3 import build_key
+from sector.services import list_department_sectors
 
 from .attachments import (
     COMMENT_ATTACHMENT_SALT,
@@ -395,3 +397,34 @@ class TicketWatcherModelTests(APITestCase):
                 ticket=self.ticket, kind=TicketWatcher.KIND_SECTOR,
                 target_id=sector_id, target_name='Elétrica (duplicado)',
             )
+
+
+class DepartmentSectorsServiceTests(APITestCase):
+    """A distinção entre falha e vazio é o ponto deste serviço: `list_sectors`
+    devolve [] em erro de rede, o que aqui viraria 'departamento sem setores' e
+    faria o backend gravar zero acompanhantes achando que deu certo."""
+
+    @patch('sector.services.requests.get')
+    def test_returns_sectors_of_department(self, mock_get):
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {
+            'data': [{'id': 'aaa', 'name': 'Elétrica'}, {'id': 'bbb', 'name': 'Mecânica'}]
+        }
+        result = list_department_sectors('dept-uuid', 'Bearer x')
+        self.assertEqual([s['name'] for s in result], ['Elétrica', 'Mecânica'])
+
+    @patch('sector.services.requests.get', side_effect=requests.RequestException('down'))
+    def test_returns_none_on_network_error(self, _get):
+        # None = não deu para consultar. Diferente de [] (consultou, veio vazio).
+        self.assertIsNone(list_department_sectors('dept-uuid', 'Bearer x'))
+
+    @patch('sector.services.requests.get')
+    def test_returns_none_on_bad_status(self, mock_get):
+        mock_get.return_value.status_code = 500
+        self.assertIsNone(list_department_sectors('dept-uuid', 'Bearer x'))
+
+    @patch('sector.services.requests.get')
+    def test_returns_empty_list_when_department_has_no_sectors(self, mock_get):
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {'data': []}
+        self.assertEqual(list_department_sectors('dept-uuid', 'Bearer x'), [])

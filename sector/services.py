@@ -29,6 +29,40 @@ def list_sectors(params: dict | None = None, auth_header: str | None = None) -> 
     return r.json()
 
 
+def list_department_sectors(department_id, auth_header: str | None = None) -> list | None:
+    """Setores ATIVOS de um departamento (GET /sectors/?department_id=&is_active=true).
+
+    Devolve None quando não deu para consultar (rede ou status != 200) e [] quando
+    o departamento realmente não tem setor ativo. A diferença importa: quem chama
+    grava acompanhantes a partir daqui, e tratar falha como lista vazia gravaria
+    zero acompanhantes respondendo sucesso — o usuário acharia que deu acesso ao
+    departamento inteiro e ninguém teria recebido nada.
+
+    Por isso NÃO reusa list_sectors: aquele engole o erro de propósito, porque
+    serve para popular dropdown, onde degradar é o certo.
+    """
+    if not department_id:
+        return []
+
+    url = f'{base_url()}/sectors/'
+    params = {'department_id': str(department_id), 'is_active': 'true'}
+
+    try:
+        r = requests.get(url, headers=headers(auth_header), params=params, timeout=DEFAULT_TIMEOUT)
+    except requests.RequestException as exc:
+        logger.warning('list_department_sectors(%s) falhou: %s', department_id, exc)
+        return None
+
+    if r.status_code != 200:
+        logger.warning('list_department_sectors(%s) retornou status %s', department_id, r.status_code)
+        return None
+
+    body = r.json()
+    # O SectorViewSet.list do auth-server devolve {'data': [...]} sem paginação.
+    items = body.get('data', []) if isinstance(body, dict) else body
+    return [{'id': s['id'], 'name': s.get('name', '')} for s in items if s.get('id')]
+
+
 def _write_sector(
     method: str,
     url: str,
