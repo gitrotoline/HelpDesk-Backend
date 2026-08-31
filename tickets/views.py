@@ -290,12 +290,20 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
             return
         if ticket.sector_id and str(sector_uuid) == str(ticket.sector_id):
             return
-        # ORIGIN_REQUESTER, sem notificação: notificar o setor inteiro a cada
-        # chamado aberto seria ruído (ver _upsert_sector_watcher/add_watcher,
-        # que notifica só inclusão manual/departamento/menção).
         self._upsert_sector_watcher(
             ticket, sector_uuid, sector.name or '',
             TicketWatcher.ORIGIN_REQUESTER, '',
+        )
+        # Notifica o setor de quem abriu. O receio de ruído que fez isto nascer
+        # silencioso vale para COMENTÁRIO (uma thread de 10 mensagens vira 10
+        # avisos por pessoa); abertura é UM aviso por chamado. E sem ele o
+        # colega só descobre o chamado se passar pela listagem, o que esvazia o
+        # sentido de compartilhar com o setor. Quem abriu não se autonotifica —
+        # a regra vive dentro do notify().
+        self._notify_watchers(
+            ticket,
+            f'Novo chamado #{ticket.pk} aberto no seu setor',
+            sector_ids=[sector_uuid],
         )
 
 

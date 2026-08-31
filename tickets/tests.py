@@ -939,13 +939,17 @@ class RequesterSectorWatcherTests(APITestCase):
 
     @patch('tickets.views.notify_sector')
     @patch('tickets.views.notify')
-    def test_creating_ticket_does_not_notify_requester_sector(self, _n, mock_sector):
-        # _notify_sector já avisa o setor DESTINO; o setor de quem abriu não
-        # pode ser notificado — viraria ruído a cada chamado aberto.
+    def test_creating_ticket_notifies_both_sectors(self, _n, mock_sector):
+        # Os DOIS setores são avisados na abertura: o destino (quem vai atender,
+        # via _notify_sector) e o de quem abriu, que passa a acompanhar.
+        # A versão anterior calava o setor do solicitante por receio de ruído —
+        # receio que vale para COMENTÁRIO (uma thread de 10 vira 10 avisos por
+        # pessoa), não para abertura, que é um aviso por chamado. Sem ele, o
+        # colega só descobria o chamado se passasse pela listagem.
         resp = self._create_ticket()
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
         notified = [str(call.args[0]) for call in mock_sector.call_args_list]
-        self.assertNotIn(self.SEC_REQUESTER, notified)
+        self.assertIn(self.SEC_REQUESTER, notified)
         self.assertIn(self.SEC_DEST, notified)
 
     @patch('tickets.views.notify_sector')
@@ -975,6 +979,57 @@ class RequesterSectorWatcherTests(APITestCase):
         self.assertEqual(
             created.watchers.filter(origin=TicketWatcher.ORIGIN_REQUESTER).count(), 0
         )
+
+
+class RequesterSectorNotificationTests(APITestCase):
+    """Abrir chamado avisa o setor de quem abriu. Diferente do comentário, que
+    segue silencioso para acompanhantes: abertura é UM aviso por chamado, e sem
+    ele o colega só descobriria o chamado passando pela listagem."""
+
+    TI = 'aaaaaaa1-1111-1111-1111-11111111111c'
+    PCP = 'bbbbbbb2-2222-2222-2222-22222222222c'
+
+    def setUp(self):
+        self.ttype = TicketType.objects.create(name='Problema')
+        self.prio = TicketPriority.objects.create(name='Alta')
+        self.status_open = TicketStatus.objects.create(name='Aberto', is_default=True)
+        self.client.force_authenticate(
+            user=make_user_with_sector(OWNER_ID, self.TI, 'TI')
+        )
+
+    def _abrir(self, **extra):
+        payload = {
+            'subject': 'Novo', 'type_of_ticket': self.ttype.id,
+            'priority': self.prio.id, 'status': self.status_open.id,
+            'sector': self.PCP, 'sector_name': 'PCP',
+        }
+        payload.update(extra)
+        return self.client.post(reverse('ticket-list'), payload)
+
+    @patch('tickets.views.notify')
+    @patch('tickets.views.notify_sector')
+    def test_creation_notifies_requester_sector(self, mock_sector, _n):
+        self._abrir()
+        alvos = [str(c.args[0]) for c in mock_sector.call_args_list]
+        self.assertIn(self.TI, alvos)   # setor de quem abriu
+        self.assertIn(self.PCP, alvos)  # setor de destino (comportamento antigo)
+
+    @patch('tickets.views.notify')
+    @patch('tickets.views.notify_sector')
+    def test_no_notification_when_not_sharing(self, mock_sector, _n):
+        self._abrir(share_with_sector=False)
+        alvos = [str(c.args[0]) for c in mock_sector.call_args_list]
+        self.assertNotIn(self.TI, alvos)
+        self.assertIn(self.PCP, alvos)
+
+    @patch('tickets.views.notify')
+    @patch('tickets.views.notify_sector')
+    def test_no_notification_when_requester_sector_is_the_destination(self, mock_sector, _n):
+        # Sem acompanhante (o setor já vê pelo caminho normal), sem aviso extra:
+        # o destino já é notificado uma vez pelo _notify_sector.
+        self._abrir(sector=self.TI, sector_name='TI')
+        alvos = [str(c.args[0]) for c in mock_sector.call_args_list]
+        self.assertEqual(alvos.count(self.TI), 1)
 
 
 class TicketDeleteNotificationsTests(APITestCase):
