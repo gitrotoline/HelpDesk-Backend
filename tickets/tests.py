@@ -673,4 +673,41 @@ class WatcherVisibilityTests(APITestCase):
         self.client.force_authenticate(user=self.outsider)
         resp = self.client.get(reverse('ticket-list'))
         self.assertEqual(resp.data['count'], 1)
+
+
+class WatcherNotificationTests(APITestCase):
+    SEC_A = 'aaaaaaa1-0000-0000-0000-000000000001'
+
+    def setUp(self):
+        self.ttype = TicketType.objects.create(name='Problema')
+        self.prio = TicketPriority.objects.create(name='Alta')
+        self.status_open = TicketStatus.objects.create(name='Aberto', is_default=True)
+        self.status_done = TicketStatus.objects.create(name='Fechado', is_final=True)
+        self.ticket = Ticket.objects.create(
+            user_id=OWNER_ID, subject='T', type_of_ticket=self.ttype,
+            priority=self.prio, status=self.status_open,
+        )
+        TicketWatcher.objects.create(
+            ticket=self.ticket, kind=TicketWatcher.KIND_SECTOR,
+            target_id=self.SEC_A, target_name='Elétrica',
+        )
+        self.client.force_authenticate(user=make_user())
+
+    @patch('tickets.views.notify')
+    @patch('tickets.views.notify_sector')
+    def test_close_notifies_watcher_sectors(self, mock_sector, _n):
+        self.client.post(reverse('ticket-close', args=[self.ticket.id]))
+        notified = [str(call.args[0]) for call in mock_sector.call_args_list]
+        self.assertIn(self.SEC_A, notified)
+
+    @patch('tickets.views.notify')
+    @patch('tickets.views.notify_sector')
+    def test_comment_does_not_notify_watcher_sectors(self, mock_sector, _n):
+        # Decisão explícita: acompanhante recebe marcos, não conversa. Um
+        # departamento acompanhando viraria dezenas de notificações por thread.
+        self.client.post(
+            reverse('ticket-comment-list'), {'ticket': self.ticket.id, 'body': 'oi'}
+        )
+        notified = [str(call.args[0]) for call in mock_sector.call_args_list]
+        self.assertNotIn(self.SEC_A, notified)
         self.assertEqual(self.ticket.watchers.count(), 1)

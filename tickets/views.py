@@ -173,8 +173,24 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
             raise PermissionDenied('Você não pode fechar este ticket.')
 
 
-    def _notify_watchers(self, ticket, message):
-        pass  # implementado na Task 5
+    def _notify_watchers(self, ticket, message, sector_ids=None):
+        """Marcos para os setores acompanhantes. Só linhas kind='sector': a de
+        departamento é registro de origem, e os setores dela já estão gravados.
+        Best-effort, como o _notify_sector — falha de rede não derruba a ação.
+        Quem agiu não se notifica: a regra vive dentro do notify().
+
+        `sector_ids`, quando informado, restringe o fan-out a esse subconjunto
+        (usado pelo add_watcher para não renotificar acompanhantes antigos num
+        re-POST idempotente); None (padrão, usado por close/reopen) notifica
+        todos os setores acompanhantes do ticket."""
+        watchers = ticket.watchers.filter(kind=TicketWatcher.KIND_SECTOR)
+        if sector_ids is not None:
+            watchers = watchers.filter(target_id__in=sector_ids)
+        for target_id in watchers.values_list('target_id', flat=True):
+            notify_sector(
+                target_id, 'ticket', ticket.pk, message,
+                self.request.user, self.request.user.auth_header,
+            )
 
 
     def _notify_sector(self, ticket):
@@ -207,7 +223,10 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
         if not created and not watcher.target_name and name:
             watcher.target_name = name
             watcher.save(update_fields=['target_name'])
-        return watcher
+        # Devolve também `created`: o add_watcher usa isso para notificar só os
+        # setores efetivamente novos, e não renotificar acompanhantes antigos
+        # a cada re-POST idempotente.
+        return watcher, created
 
 
     def perform_create(self, serializer):
@@ -301,6 +320,7 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
             action='Ticket fechado',
         )
         notify([ticket.user_id], 'ticket', ticket.pk, f'Ticket #{ticket.pk} foi fechado', request.user)
+        self._notify_watchers(ticket, f'Ticket #{ticket.pk} foi fechado')
         return Response(self.get_serializer(ticket).data)
 
 
@@ -332,6 +352,7 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
             action='Ticket reaberto',
         )
         notify([ticket.user_id], 'ticket', ticket.pk, f'Ticket #{ticket.pk} foi reaberto', request.user)
+        self._notify_watchers(ticket, f'Ticket #{ticket.pk} foi reaberto')
         return Response(self.get_serializer(ticket).data)
 
 
@@ -433,9 +454,14 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
             return Response({'detail': 'target_id precisa ser um UUID válido.'},
                             status=http_status.HTTP_400_BAD_REQUEST)
 
+        # Setores efetivamente novos nesta chamada — só eles recebem a notificação
+        # de inclusão, para um re-POST idempotente não renotificar acompanhantes já existentes.
+        new_sector_ids = []
         if kind == TicketWatcher.KIND_SECTOR:
-            self._upsert_sector_watcher(ticket, target_uuid, request.data.get('target_name', ''),
+            _, created = self._upsert_sector_watcher(ticket, target_uuid, request.data.get('target_name', ''),
                                         TicketWatcher.ORIGIN_MANUAL, '')
+            if created:
+                new_sector_ids.append(target_uuid)
         else:
             # None = não deu para consultar; [] = departamento sem setor ativo.
             # Tratar os dois como vazio gravaria zero acompanhantes com resposta
@@ -480,10 +506,15 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
                         sector_uuid = uuid.UUID(str(sector['id']))
                     except (ValueError, AttributeError, TypeError, KeyError):
                         continue
-                    self._upsert_sector_watcher(ticket, sector_uuid, sector.get('name', ''),
+                    _, created = self._upsert_sector_watcher(ticket, sector_uuid, sector.get('name', ''),
                                                 TicketWatcher.ORIGIN_DEPARTMENT, dept_source_ref)
+                    if created:
+                        new_sector_ids.append(sector_uuid)
 
-        self._notify_watchers(ticket, f'Você foi incluído no chamado #{ticket.pk}')
+        if new_sector_ids:
+            self._notify_watchers(
+                ticket, f'Você foi incluído no chamado #{ticket.pk}', sector_ids=new_sector_ids,
+            )
         # MINOR 6: responde explicitamente com o TicketDetailSerializer — get_serializer_class
         # só devolve ele quando self.action == 'retrieve', então o get_serializer genérico
         # aqui devolveria o TicketSerializer, sem a lista de watchers atualizada.
