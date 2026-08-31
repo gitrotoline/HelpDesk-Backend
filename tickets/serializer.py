@@ -67,6 +67,12 @@ class TicketSerializer(serializers.ModelSerializer):
     # Setor é obrigatório na criação. Em PATCH (partial), o DRF não força o
     # required; mas se vier, `allow_null=False` impede limpar o setor.
     sector = serializers.UUIDField(write_only=True, required=True, allow_null=False)
+    # HD-31: opção de quem abre o chamado. Padrão True preserva o comportamento
+    # atual (setor do solicitante vira acompanhante automático). Não é persistido
+    # no modelo — só chega até a view (perform_create) para decidir se chama
+    # _watch_requester_sector; extraído de validated_data no create() abaixo,
+    # igual a `sector`/`recipients`.
+    share_with_sector = serializers.BooleanField(write_only=True, required=False, default=True)
     type_of_ticket_name = serializers.CharField(source="type_of_ticket.name", read_only=True)
     priority_name = serializers.CharField(source="priority.name", read_only=True)
     status_name = serializers.CharField(source="status.name", read_only=True)
@@ -146,6 +152,10 @@ class TicketSerializer(serializers.ModelSerializer):
         sector = validated_data.pop('sector', None)
         if sector is not None:
             validated_data['sector_id'] = sector
+        # HD-31: não é campo do modelo — guarda na instância do serializer para a
+        # view (perform_create) ler depois do save() e decidir sobre
+        # _watch_requester_sector. Default True preserva o comportamento atual.
+        self.share_with_sector = validated_data.pop('share_with_sector', True)
         ticket = super().create(validated_data)
         self._sync_recipients(ticket, recipients)
         # As menções (M2M) já foram gravadas pelo DRF antes de chegar aqui; no
@@ -159,6 +169,9 @@ class TicketSerializer(serializers.ModelSerializer):
         recipients = validated_data.pop('recipients', None)
         if 'sector' in validated_data:
             validated_data['sector_id'] = validated_data.pop('sector')
+        # HD-31: só faz sentido na criação (perform_create); em update não há
+        # onde usar — remove para não sobrar como atributo solto na instância.
+        validated_data.pop('share_with_sector', None)
         # CRITICAL 2: captura as menções ANTES do save — só sincronizamos as que
         # foram ADICIONADAS nesta operação. Sincronizar `ticket.mentions.all()`
         # (todas, sempre) fazia um PATCH qualquer ressuscitar um acompanhante de

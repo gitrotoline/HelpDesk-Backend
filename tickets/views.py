@@ -257,13 +257,21 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
         )
 
         self._notify_sector(ticket)
-        self._watch_requester_sector(ticket)
+        # HD-31: quem abre decide se o próprio setor entra como acompanhante
+        # automático (serializer.share_with_sector, default True — ver create()
+        # do TicketSerializer). False só chega até aqui: nenhum outro passo da
+        # criação muda (notify_sector do destino, anexos, log, cópia).
+        if getattr(serializer, 'share_with_sector', True):
+            self._watch_requester_sector(ticket)
 
 
     def _watch_requester_sector(self, ticket):
         """HD-31: o setor de quem abriu o chamado passa a acompanhá-lo quando o
         destino é outro setor — sem isso, os colegas do solicitante não viam
         o próprio chamado (só o setor de destino tinha visibilidade).
+
+        Opcional: quem abre pode desativar via `share_with_sector=false`
+        (serializer) — nesse caso o caller nem chama este método.
 
         Três guardas:
         - sem setor no token → não grava nada (RemoteUser.sector é None);

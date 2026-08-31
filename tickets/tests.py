@@ -944,3 +944,31 @@ class RequesterSectorWatcherTests(APITestCase):
         notified = [str(call.args[0]) for call in mock_sector.call_args_list]
         self.assertNotIn(self.SEC_REQUESTER, notified)
         self.assertIn(self.SEC_DEST, notified)
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_share_with_sector_omitted_keeps_current_behavior(self, _n, _ns):
+        # Sem o campo no payload: default=True no serializer, watcher continua
+        # sendo criado como sempre foi.
+        resp = self._create_ticket()
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        created = Ticket.objects.get(subject='Novo')
+        self.assertEqual(
+            created.watchers.filter(origin=TicketWatcher.ORIGIN_REQUESTER).count(), 1
+        )
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_share_with_sector_false_creates_no_requester_watcher(self, _n, _ns):
+        # Quem abre optou por não compartilhar: nenhum watcher origin=requester
+        # deve ser gravado para o setor do solicitante.
+        resp = self.client.post(reverse('ticket-list'), {
+            'subject': 'Novo', 'type_of_ticket': self.ttype.id, 'priority': self.prio.id,
+            'status': self.status_open.id, 'sector': self.SEC_DEST,
+            'sector_name': 'Manutenção', 'share_with_sector': False,
+        })
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        created = Ticket.objects.get(subject='Novo')
+        self.assertEqual(
+            created.watchers.filter(origin=TicketWatcher.ORIGIN_REQUESTER).count(), 0
+        )
