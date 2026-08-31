@@ -1,5 +1,7 @@
 from django.db.models import Q
 
+from .models import TicketWatcher
+
 
 def ticket_visibility_q(user, prefix=''):
     """`Q` que filtra os tickets visíveis para `user` — usado pelo TicketViewSet e,
@@ -22,6 +24,6 @@ def ticket_visibility_q(user, prefix=''):
         # Acompanhantes: só as linhas de setor concedem acesso. A linha de
         # departamento é registro de origem — o token traz setor, não
         # departamento, então ela nunca casaria com ninguém.
-        scope |= Q(**{field('watchers__kind'): 'sector',
+        scope |= Q(**{field('watchers__kind'): TicketWatcher.KIND_SECTOR,
                       field('watchers__target_id'): user.sector.id})
     return scope

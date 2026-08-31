@@ -649,6 +649,15 @@ class WatcherVisibilityTests(APITestCase):
         resp = self.client.get(reverse('ticket-list'))
         self.assertEqual(resp.data['count'], 0)
 
+    def test_watcher_of_another_sector_grants_nothing(self):
+        # kind certo, target_id de OUTRO setor: o usuário não pode ver. Cobre a
+        # troca de campo no Q (ex.: comparar `kind` onde deveria ser `target_id`),
+        # que a prova por mutação não pega — ela só cobre a ausência da cláusula.
+        self._watch(target_id='bbbbbbb2-0000-0000-0000-000000000002')
+        self.client.force_authenticate(user=self.outsider)
+        resp = self.client.get(reverse('ticket-list'))
+        self.assertEqual(resp.data['count'], 0)
+
     def test_removing_watcher_removes_access(self):
         watcher = self._watch()
         watcher.delete()
