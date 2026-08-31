@@ -97,7 +97,7 @@ def list_sector_user_ids(sector_id, auth_header: str | None = None) -> list:
             # O auth-server devolve {"users": [...]}; aceita também {"results": [...]}
             # ou uma lista pura por robustez.
             if isinstance(body, dict):
-                results = body.get('users') or body.get('results') or []
+                results = body.get('data') or body.get('results') or []
             else:
                 results = body
             for user in results:
