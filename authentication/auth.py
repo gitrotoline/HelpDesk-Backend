@@ -126,7 +126,16 @@ class RemoteUser:
         if isinstance(_sector, dict):
             self.sector = _Sector(_sector.get('id'), _sector.get('name') or _sector.get('nome'))
         elif merged.get('sector_id'):
-            self.sector = _Sector(merged.get('sector_id'), merged.get('sector_name'))
+            # Forma real do auth-server: o NOME vem em `sector` (string) e o id
+            # em `sector_id` — no UserSerializer de lá,
+            # `sector = CharField(source='sector.name')`. O `sector_name` que
+            # líamos aqui não existe naquele payload, então o nome ficava vazio
+            # (o id vinha certo, por isso a visibilidade funcionava e só o
+            # rótulo na tela saía em branco).
+            name = merged.get('sector_name')
+            if not name and isinstance(_sector, str):
+                name = _sector
+            self.sector = _Sector(merged.get('sector_id'), name)
         else:
             self.sector = None
         self.escala = _Schedule(merged['schedule']) if merged.get('schedule') else None
