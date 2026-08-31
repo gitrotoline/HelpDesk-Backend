@@ -428,3 +428,20 @@ class DepartmentSectorsServiceTests(APITestCase):
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = {'data': []}
         self.assertEqual(list_department_sectors('dept-uuid', 'Bearer x'), [])
+
+    @patch('sector.services.requests.get')
+    def test_returns_none_on_invalid_json_body(self, mock_get):
+        # 200 com corpo não-JSON/vazio: r.json() levanta ValueError. Precisa
+        # virar None, não propagar a exceção nem virar [] silenciosamente.
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.side_effect = ValueError('No JSON object could be decoded')
+        self.assertIsNone(list_department_sectors('dept-uuid', 'Bearer x'))
+
+    @patch('sector.services.requests.get')
+    def test_ignores_malformed_item_among_valid_ones(self, mock_get):
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {
+            'data': [{'id': 'aaa', 'name': 'Elétrica'}, 'not-a-dict', {'id': 'bbb', 'name': 'Mecânica'}]
+        }
+        result = list_department_sectors('dept-uuid', 'Bearer x')
+        self.assertEqual([s['name'] for s in result], ['Elétrica', 'Mecânica'])

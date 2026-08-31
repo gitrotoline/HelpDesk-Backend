@@ -57,10 +57,19 @@ def list_department_sectors(department_id, auth_header: str | None = None) -> li
         logger.warning('list_department_sectors(%s) retornou status %s', department_id, r.status_code)
         return None
 
-    body = r.json()
+    try:
+        body = r.json()
+    except ValueError as exc:
+        logger.warning('list_department_sectors(%s) corpo inválido: %s', department_id, exc)
+        return None
+
     # O SectorViewSet.list do auth-server devolve {'data': [...]} sem paginação.
     items = body.get('data', []) if isinstance(body, dict) else body
-    return [{'id': s['id'], 'name': s.get('name', '')} for s in items if s.get('id')]
+    return [
+        {'id': s['id'], 'name': s.get('name', '')}
+        for s in items
+        if isinstance(s, dict) and s.get('id')
+    ]
 
 
 def _write_sector(
