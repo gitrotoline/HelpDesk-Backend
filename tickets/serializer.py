@@ -17,6 +17,7 @@ from .models import (
     Ticket,
     TicketRecipient,
     TicketType,
+    TicketWatcher,
 )
 from .scope import ticket_visibility_q
 
@@ -159,6 +160,12 @@ class TicketRelatedSerializer(serializers.ModelSerializer):
         ]
 
 
+class TicketWatcherSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TicketWatcher
+        fields = ['id', 'kind', 'target_id', 'target_name', 'origin', 'source_ref']
+
+
 class TicketDetailSerializer(TicketSerializer):
     """TicketSerializer + os relacionados. Usado só no retrieve (ver views.py):
     os dois campos custam 2 queries por objeto, o que na listagem seria N+1."""
@@ -167,6 +174,8 @@ class TicketDetailSerializer(TicketSerializer):
     # no models.py): quem cita este chamado. Sem este campo essa relação fica
     # invisível na API, já que `mentions` só anda em um sentido (B -> A).
     mentioned_in_detail = serializers.SerializerMethodField()
+    # Setores/departamentos acompanhando o chamado (ver TicketWatcher no models.py).
+    watchers = TicketWatcherSerializer(many=True, read_only=True)
 
     def _related(self, manager):
         # Filtra pela MESMA regra de visibilidade dos chamados: sem isso, a

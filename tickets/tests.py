@@ -445,3 +445,105 @@ class DepartmentSectorsServiceTests(APITestCase):
         }
         result = list_department_sectors('dept-uuid', 'Bearer x')
         self.assertEqual([s['name'] for s in result], ['Elétrica', 'Mecânica'])
+
+
+class TicketWatcherApiTests(APITestCase):
+    DEPT = '55555555-5555-5555-5555-555555555555'
+    SEC_A = 'aaaaaaa1-0000-0000-0000-000000000001'
+    SEC_B = 'aaaaaaa1-0000-0000-0000-000000000002'
+
+    def setUp(self):
+        self.ttype = TicketType.objects.create(name='Problema')
+        self.prio = TicketPriority.objects.create(name='Alta')
+        self.status_open = TicketStatus.objects.create(name='Aberto', is_default=True)
+        self.ticket = Ticket.objects.create(
+            user_id=OWNER_ID, subject='T', type_of_ticket=self.ttype,
+            priority=self.prio, status=self.status_open,
+        )
+        self.client.force_authenticate(user=make_user())
+        self.url = reverse('ticket-watchers', args=[self.ticket.id])
+
+    @patch('tickets.views.notify_sector')
+    def test_add_sector_watcher(self, _ns):
+        resp = self.client.post(self.url, {'kind': 'sector', 'target_id': self.SEC_A})
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        watcher = TicketWatcher.objects.get(ticket=self.ticket)
+        self.assertEqual(watcher.origin, TicketWatcher.ORIGIN_MANUAL)
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.list_department_sectors')
+    def test_add_department_expands_and_keeps_origin_row(self, mock_list, _ns):
+        mock_list.return_value = [
+            {'id': self.SEC_A, 'name': 'Elétrica'}, {'id': self.SEC_B, 'name': 'Mecânica'},
+        ]
+        resp = self.client.post(self.url, {'kind': 'department', 'target_id': self.DEPT})
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        # 1 linha de origem (departamento) + 1 por setor expandido.
+        self.assertEqual(self.ticket.watchers.filter(kind='department').count(), 1)
+        derived = self.ticket.watchers.filter(kind='sector')
+        self.assertEqual(derived.count(), 2)
+        self.assertTrue(all(w.origin == TicketWatcher.ORIGIN_DEPARTMENT for w in derived))
+        self.assertTrue(all(str(w.source_ref) == self.DEPT for w in derived))
+
+    @patch('tickets.views.list_department_sectors', return_value=None)
+    def test_department_expansion_failure_returns_502_and_saves_nothing(self, _m):
+        resp = self.client.post(self.url, {'kind': 'department', 'target_id': self.DEPT})
+        self.assertEqual(resp.status_code, status.HTTP_502_BAD_GATEWAY)
+        self.assertEqual(self.ticket.watchers.count(), 0)
+
+    @patch('tickets.views.list_department_sectors', return_value=[])
+    def test_department_without_active_sectors_returns_400(self, _m):
+        resp = self.client.post(self.url, {'kind': 'department', 'target_id': self.DEPT})
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(self.ticket.watchers.count(), 0)
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.list_department_sectors')
+    def test_expansion_does_not_downgrade_manual_sector(self, mock_list, _ns):
+        # Escolha explícita ganha de expansão automática.
+        TicketWatcher.objects.create(
+            ticket=self.ticket, kind='sector', target_id=self.SEC_A,
+            target_name='Elétrica', origin=TicketWatcher.ORIGIN_MANUAL,
+        )
+        mock_list.return_value = [{'id': self.SEC_A, 'name': 'Elétrica'}]
+        self.client.post(self.url, {'kind': 'department', 'target_id': self.DEPT})
+        watcher = self.ticket.watchers.get(kind='sector', target_id=self.SEC_A)
+        self.assertEqual(watcher.origin, TicketWatcher.ORIGIN_MANUAL)
+
+    @patch('tickets.views.notify_sector')
+    def test_adding_manually_promotes_derived_sector(self, _ns):
+        TicketWatcher.objects.create(
+            ticket=self.ticket, kind='sector', target_id=self.SEC_A, target_name='Elétrica',
+            origin=TicketWatcher.ORIGIN_DEPARTMENT, source_ref=self.DEPT,
+        )
+        self.client.post(self.url, {'kind': 'sector', 'target_id': self.SEC_A})
+        watcher = self.ticket.watchers.get(kind='sector', target_id=self.SEC_A)
+        self.assertEqual(watcher.origin, TicketWatcher.ORIGIN_MANUAL)
+        self.assertEqual(watcher.source_ref, '')
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.list_department_sectors')
+    def test_removing_department_keeps_promoted_sector(self, mock_list, _ns):
+        mock_list.return_value = [
+            {'id': self.SEC_A, 'name': 'Elétrica'}, {'id': self.SEC_B, 'name': 'Mecânica'},
+        ]
+        self.client.post(self.url, {'kind': 'department', 'target_id': self.DEPT})
+        self.client.post(self.url, {'kind': 'sector', 'target_id': self.SEC_A})  # promove A
+        dept_row = self.ticket.watchers.get(kind='department')
+        detail = reverse('ticket-watcher-detail', args=[self.ticket.id, dept_row.id])
+        resp = self.client.delete(detail)
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        remaining = list(self.ticket.watchers.values_list('target_id', flat=True))
+        self.assertEqual([str(t) for t in remaining], [self.SEC_A])  # B saiu, A ficou
+
+    def test_detail_exposes_watchers(self):
+        TicketWatcher.objects.create(
+            ticket=self.ticket, kind='sector', target_id=self.SEC_A, target_name='Elétrica',
+        )
+        resp = self.client.get(reverse('ticket-detail', args=[self.ticket.id]))
+        self.assertEqual([w['target_name'] for w in resp.data['watchers']], ['Elétrica'])
+
+    def test_outsider_cannot_manage_watchers(self):
+        self.client.force_authenticate(user=make_user(user_id=OTHER_ID))
+        resp = self.client.post(self.url, {'kind': 'sector', 'target_id': self.SEC_A})
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)

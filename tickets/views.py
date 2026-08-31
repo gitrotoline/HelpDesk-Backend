@@ -13,6 +13,7 @@ from rest_framework.views import APIView
 
 from core.s3 import get_object_stream, upload_fileobj
 from notifications.services import notify, notify_sector
+from sector.services import list_department_sectors
 
 from .attachments import (
     COMMENT_ATTACHMENT_SALT,
@@ -30,6 +31,7 @@ from .models import (
     Ticket,
     TicketView,
     TicketType,
+    TicketWatcher,
 )
 from .serializer import (
     TicketAttachmentSerializer,
@@ -166,6 +168,10 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
         in_sector = bool(user.sector and user.sector.id and user.sector.id == ticket.sector_id)
         if str(ticket.user_id) != str(user.id) and not in_sector and not user.has_perm('user.tier_admin'):
             raise PermissionDenied('Você não pode fechar este ticket.')
+
+
+    def _notify_watchers(self, ticket, message):
+        pass  # implementado na Task 5
 
 
     def _notify_sector(self, ticket):
@@ -367,6 +373,82 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
         ticket = self.get_object()
         self._assert_can_edit(ticket)
         TicketAttachment.objects.filter(ticket=ticket, pk=attachment_id).delete()
+        return Response(status=http_status.HTTP_204_NO_CONTENT)
+
+
+    # url_name explícito: sem ele o nome da rota seria 'ticket-add-watcher'
+    # (DRF deriva do nome do método), e os testes usam reverse('ticket-watchers').
+    @action(detail=True, methods=['post'], url_path='watchers', url_name='watchers')
+    def add_watcher(self, request, pk=None):
+        """Inclui um setor — ou um departamento, que é expandido nos setores dele."""
+        # Busca SEM o filtro de visibilidade do get_queryset (que é regra de LEITURA
+        # — dono, setor do ticket ou cópia): editar é mais restrito (_assert_can_edit,
+        # só dono/admin), então quem só vê o chamado tem que cair em 403, não 404.
+        ticket = get_object_or_404(Ticket, pk=pk)
+        self._assert_can_edit(ticket)
+        kind = request.data.get('kind')
+        target_id = request.data.get('target_id')
+        if kind not in (TicketWatcher.KIND_SECTOR, TicketWatcher.KIND_DEPARTMENT) or not target_id:
+            return Response({'detail': 'kind e target_id são obrigatórios.'},
+                            status=http_status.HTTP_400_BAD_REQUEST)
+
+        if kind == TicketWatcher.KIND_SECTOR:
+            self._upsert_sector_watcher(ticket, target_id, request.data.get('target_name', ''),
+                                        TicketWatcher.ORIGIN_MANUAL, '')
+        else:
+            # None = não deu para consultar; [] = departamento sem setor ativo.
+            # Tratar os dois como vazio gravaria zero acompanhantes com resposta
+            # de sucesso, e o usuário acharia que deu acesso ao departamento.
+            sectors = list_department_sectors(target_id, request.user.auth_header)
+            if sectors is None:
+                return Response(
+                    {'detail': 'Não foi possível consultar os setores do departamento.'},
+                    status=http_status.HTTP_502_BAD_GATEWAY,
+                )
+            if not sectors:
+                return Response({'detail': 'Este departamento não tem setores ativos.'},
+                                status=http_status.HTTP_400_BAD_REQUEST)
+            TicketWatcher.objects.get_or_create(
+                ticket=ticket, kind=TicketWatcher.KIND_DEPARTMENT, target_id=target_id,
+                defaults={'target_name': request.data.get('target_name', ''),
+                          'origin': TicketWatcher.ORIGIN_MANUAL},
+            )
+            for sector in sectors:
+                self._upsert_sector_watcher(ticket, sector['id'], sector.get('name', ''),
+                                            TicketWatcher.ORIGIN_DEPARTMENT, str(target_id))
+
+        self._notify_watchers(ticket, f'Você foi incluído no chamado #{ticket.pk}')
+        return Response(self.get_serializer(ticket).data, status=http_status.HTTP_201_CREATED)
+
+    def _upsert_sector_watcher(self, ticket, sector_id, name, origin, source_ref):
+        """Grava o acompanhante de setor respeitando o princípio: escolha explícita
+        (manual) ganha de expansão automática. Manual promove o que era derivado;
+        derivado nunca rebaixa o que era manual."""
+        watcher, created = TicketWatcher.objects.get_or_create(
+            ticket=ticket, kind=TicketWatcher.KIND_SECTOR, target_id=sector_id,
+            defaults={'target_name': name, 'origin': origin, 'source_ref': source_ref},
+        )
+        if not created and origin == TicketWatcher.ORIGIN_MANUAL \
+                and watcher.origin != TicketWatcher.ORIGIN_MANUAL:
+            watcher.origin = TicketWatcher.ORIGIN_MANUAL
+            watcher.source_ref = ''
+            watcher.save(update_fields=['origin', 'source_ref'])
+        return watcher
+
+    @action(detail=True, methods=['delete'],
+            url_path=r'watchers/(?P<watcher_id>[^/.]+)', url_name='watcher-detail')
+    def remove_watcher(self, request, pk=None, watcher_id=None):
+        """Remove o acompanhante. Removendo um departamento saem também os setores
+        que ELE gerou — os promovidos a manual ficam, porque foram escolhidos."""
+        ticket = get_object_or_404(Ticket, pk=pk)  # ver add_watcher: mesmo motivo
+        self._assert_can_edit(ticket)
+        watcher = get_object_or_404(TicketWatcher, ticket=ticket, pk=watcher_id)
+        if watcher.kind == TicketWatcher.KIND_DEPARTMENT:
+            TicketWatcher.objects.filter(
+                ticket=ticket, kind=TicketWatcher.KIND_SECTOR,
+                origin=TicketWatcher.ORIGIN_DEPARTMENT, source_ref=str(watcher.target_id),
+            ).delete()
+        watcher.delete()
         return Response(status=http_status.HTTP_204_NO_CONTENT)
 
 
