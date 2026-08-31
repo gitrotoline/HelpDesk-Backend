@@ -59,8 +59,10 @@ class TicketPriority(models.Model):
 
 
 class TicketAttachment(models.Model):
+    # Anexo no nível do chamado no S3 (bucket privado). Guardamos a CHAVE do objeto; a URL de leitura é uma presigned GET gerada na hora (core/s3.py).
     ticket = models.ForeignKey(Ticket, on_delete=models.CASCADE, related_name='attachments')
-    url = models.URLField(max_length=500)
+    key = models.CharField(max_length=600)  # chave do objeto no S3
+    name = models.CharField(max_length=255, blank=True, default='')  # nome original (exibição)
     uploaded_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -69,7 +71,44 @@ class TicketAttachment(models.Model):
         verbose_name_plural = 'Ticket Attachments'
 
     def __str__(self):
-        return self.url
+        return self.name or self.key
+
+
+class TicketComment(models.Model):
+    # Resposta/comentário na thread do ticket. Autor vem do auth-server (JWT),
+    # então guardamos só o UUID + snapshot do nome — sem FK p/ usuário local.
+    ticket = models.ForeignKey(Ticket, on_delete=models.CASCADE, related_name='comments')
+    user_id = models.UUIDField()
+    user_name = models.CharField(max_length=150, blank=True, default='')
+    body = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'db_ticket_comment'
+        verbose_name = 'Ticket Comment'
+        verbose_name_plural = 'Ticket Comments'
+        ordering = ['created_at']  # thread em ordem cronológica
+
+    def __str__(self):
+        return f'#{self.ticket_id} - {self.user_name}'
+
+
+class TicketCommentAttachment(models.Model):
+    # Anexo de um comentário no S3 (bucket privado). Guardamos a CHAVE do objeto;
+    # a URL de leitura é uma presigned GET gerada na hora (ver core/s3.py).
+    comment = models.ForeignKey(TicketComment, on_delete=models.CASCADE, related_name='attachments')
+    key = models.CharField(max_length=600)  # chave do objeto no S3
+    name = models.CharField(max_length=255)  # nome ORIGINAL do arquivo (exibição)
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'db_ticket_comment_attachment'
+        verbose_name = 'Ticket Comment Attachment'
+        verbose_name_plural = 'Ticket Comment Attachments'
+
+    def __str__(self):
+        return self.name
 
 
 class TicketRecipient(models.Model):

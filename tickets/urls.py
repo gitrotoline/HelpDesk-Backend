@@ -1,6 +1,10 @@
+from django.urls import path
 from rest_framework.routers import DefaultRouter
 
 from .views import (
+    CommentAttachmentDownloadView,
+    TicketAttachmentDownloadView,
+    TicketCommentViewSet,
     TicketPriorityViewSet,
     TicketStatusViewSet,
     TicketViewSet,
@@ -13,6 +17,21 @@ router = DefaultRouter()
 router.register("types", TicketTypeViewSet, basename="ticket-type")
 router.register("priorities", TicketPriorityViewSet, basename="ticket-priority")
 router.register("statuses", TicketStatusViewSet, basename="ticket-status")
+router.register("comments", TicketCommentViewSet, basename="ticket-comment")
 router.register("", TicketViewSet, basename="ticket")
 
-urlpatterns = router.urls
+urlpatterns = [
+    # Proxy de download (link permanente e assinado). Vêm antes do "" do router
+    # para não serem capturadas como id de ticket.
+    path(
+        "attachments/<str:token>",
+        TicketAttachmentDownloadView.as_view(),
+        name="ticket-attachment-download",
+    ),
+    path(
+        "comments/attachments/<str:token>",
+        CommentAttachmentDownloadView.as_view(),
+        name="comment-attachment-download",
+    ),
+    *router.urls,
+]

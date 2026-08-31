@@ -1,6 +1,8 @@
 from django.contrib import admin
 
 from .models import (
+    TicketComment,
+    TicketCommentAttachment,
     TicketLog,
     TicketPriority,
     TicketView,
@@ -14,6 +16,11 @@ from .models import (
 
 class TicketAttachmentInline(admin.TabularInline):
     model = TicketAttachment
+    extra = 0
+
+
+class TicketCommentAttachmentInline(admin.TabularInline):
+    model = TicketCommentAttachment
     extra = 0
 
 
@@ -47,6 +54,19 @@ class TicketTypeAdmin(admin.ModelAdmin):
 class TicketPriorityAdmin(admin.ModelAdmin):
     list_display = ('name',)
     search_fields = ('name',)
+
+
+@admin.register(TicketComment)
+class TicketCommentAdmin(admin.ModelAdmin):
+    list_display = ('id', 'ticket', 'user_name', 'body_short', 'created_at')
+    list_filter = ('created_at',)
+    search_fields = ('body',)
+    readonly_fields = ('user_id', 'created_at', 'updated_at')
+    inlines = [TicketCommentAttachmentInline]
+
+    @admin.display(description='Comentário')
+    def body_short(self, obj):
+        return obj.body[:60] + ('…' if len(obj.body) > 60 else '')
 
 
 @admin.register(TicketLog)
