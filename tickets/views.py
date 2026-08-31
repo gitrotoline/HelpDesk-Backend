@@ -257,6 +257,37 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
         )
 
         self._notify_sector(ticket)
+        self._watch_requester_sector(ticket)
+
+
+    def _watch_requester_sector(self, ticket):
+        """HD-31: o setor de quem abriu o chamado passa a acompanhá-lo quando o
+        destino é outro setor — sem isso, os colegas do solicitante não viam
+        o próprio chamado (só o setor de destino tinha visibilidade).
+
+        Três guardas:
+        - sem setor no token → não grava nada (RemoteUser.sector é None);
+        - setor do solicitante == setor de destino → não grava (o setor já
+          enxerga o chamado pelo caminho normal; a linha só sujaria o painel);
+        - normaliza o UUID (mesmo cuidado do add_watcher — um UUID persistido
+          fora da forma canônica vira uma linha órfã, inalcançável no filtro
+          de visibilidade)."""
+        sector = self.request.user.sector
+        if not sector or not sector.id:
+            return
+        try:
+            sector_uuid = uuid.UUID(str(sector.id))
+        except (ValueError, AttributeError, TypeError):
+            return
+        if ticket.sector_id and str(sector_uuid) == str(ticket.sector_id):
+            return
+        # ORIGIN_REQUESTER, sem notificação: notificar o setor inteiro a cada
+        # chamado aberto seria ruído (ver _upsert_sector_watcher/add_watcher,
+        # que notifica só inclusão manual/departamento/menção).
+        self._upsert_sector_watcher(
+            ticket, sector_uuid, sector.name or '',
+            TicketWatcher.ORIGIN_REQUESTER, '',
+        )
 
 
     def perform_update(self, serializer):

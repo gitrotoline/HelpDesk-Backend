@@ -179,10 +179,15 @@ class TicketWatcher(models.Model):
     ORIGIN_MANUAL = 'manual'
     ORIGIN_DEPARTMENT = 'department'
     ORIGIN_MENTION = 'mention'
+    # HD-31: setor de quem ABRIU o chamado, incluído automaticamente na
+    # criação quando o destino é outro setor — para o time de origem não
+    # perder a visibilidade do próprio chamado.
+    ORIGIN_REQUESTER = 'requester'
     ORIGIN_CHOICES = [
         (ORIGIN_MANUAL, 'Escolhido'),
         (ORIGIN_DEPARTMENT, 'Veio do departamento'),
         (ORIGIN_MENTION, 'Veio de uma menção'),
+        (ORIGIN_REQUESTER, 'Setor de quem abriu'),
     ]
 
     ticket = models.ForeignKey(Ticket, on_delete=models.CASCADE, related_name='watchers')

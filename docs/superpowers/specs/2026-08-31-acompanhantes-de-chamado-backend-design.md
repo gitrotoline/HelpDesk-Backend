@@ -286,3 +286,46 @@ Permissão:
 5. Notificação de marcos
 6. Menção → acompanhante
 7. Suíte completa
+
+## 9. Setor de quem abriu → acompanhante (HD-31)
+
+Problema real observado: um colega do TI abre um chamado **para** a Manutenção, e
+os demais colegas do TI deixam de ver esse chamado — `Ticket.sector_id` é sempre o
+**destino**, e o setor de quem abriu não fica gravado em lugar nenhum.
+
+Solução: reusar a mesma mecânica de acompanhante. Nova origem
+`ORIGIN_REQUESTER = 'requester'` (rótulo "Setor de quem abriu"), incluída em
+`ORIGIN_CHOICES` — migration só de metadados (`AlterField`), sem tocar em dado
+existente.
+
+No `perform_create` do `TicketViewSet`, depois do `_notify_sector` (que continua
+avisando só o setor de **destino**), `_watch_requester_sector(ticket)` grava um
+`TicketWatcher(kind='sector', origin='requester', source_ref='')` com o setor do
+solicitante, reusando o `_upsert_sector_watcher` já existente (mesma normalização
+de UUID do `add_watcher` — evita a linha órfã de UUID não-canônico).
+
+Três guardas:
+
+- **Sem setor no token** (`request.user.sector is None`): não grava nada, não
+  quebra o `create`.
+- **Setor do solicitante == setor de destino**: não grava. O setor já enxerga o
+  chamado pelo caminho normal (`ticket.sector_id`); gravar aqui só duplicaria a
+  linha sem trazer visibilidade nova.
+- **UUID normalizado** antes do `get_or_create`, igual ao `add_watcher`.
+
+**Sem notificação de inclusão neste caso.** O `add_watcher` manual notifica "Você
+foi incluído no chamado #N" para o setor recém-incluído; aqui não — notificar o
+setor inteiro a cada chamado aberto para outro setor viraria ruído constante. Os
+colegas passam a **ver** o chamado (e recebem os marcos de fechado/reaberto como
+qualquer acompanhante), sem notificação de entrada.
+
+Testes em `tickets/tests.py::RequesterSectorWatcherTests`:
+1. Chamado para outro setor grava o watcher `origin=requester` com o setor do
+   solicitante.
+2. Ponta a ponta (prova a demanda): colega do MESMO setor do solicitante, com
+   outro `user_id`, passa a ver o chamado na listagem — provado por mutação
+   (removendo a chamada a `_watch_requester_sector`, o teste falha).
+3. Solicitante do mesmo setor do destino → nenhum watcher.
+4. Solicitante sem setor no token → nenhum watcher, sem erro.
+5. Criar chamado não notifica o setor do solicitante (só o destino), inspecionando
+   as chamadas de `tickets.views.notify_sector`.

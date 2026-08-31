@@ -861,3 +861,86 @@ class MentionWatcherTests(APITestCase):
         self.assertEqual(str(watcher.target_id), self.SEC_A)
         self.assertEqual(watcher.origin, TicketWatcher.ORIGIN_MENTION)
         mock_serializer_notify.assert_called_once()
+
+
+class RequesterSectorWatcherTests(APITestCase):
+    """HD-31: quem abre um chamado para OUTRO setor precisa continuar vendo o
+    próprio chamado — hoje só o setor de destino (Ticket.sector_id) enxerga.
+    A solução reusa TicketWatcher: o setor de quem abriu entra como
+    acompanhante automático (origin=requester), sem notificar o setor todo."""
+
+    SEC_REQUESTER = 'aaaaaaa1-0000-0000-0000-000000000001'
+    SEC_DEST = '99999999-9999-9999-9999-999999999999'
+
+    def setUp(self):
+        self.ttype = TicketType.objects.create(name='Problema')
+        self.prio = TicketPriority.objects.create(name='Alta')
+        self.status_open = TicketStatus.objects.create(name='Aberto', is_default=True)
+        self.requester = make_user_with_sector(OWNER_ID, self.SEC_REQUESTER, sector_name='TI')
+        self.client.force_authenticate(user=self.requester)
+
+    def _create_ticket(self, sector=None, sector_name='Manutenção'):
+        return self.client.post(reverse('ticket-list'), {
+            'subject': 'Novo', 'type_of_ticket': self.ttype.id, 'priority': self.prio.id,
+            'status': self.status_open.id, 'sector': sector or self.SEC_DEST,
+            'sector_name': sector_name,
+        })
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_creating_ticket_for_another_sector_adds_requester_sector_as_watcher(self, _n, _ns):
+        resp = self._create_ticket()
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        created = Ticket.objects.get(subject='Novo')
+        watcher = created.watchers.get(origin=TicketWatcher.ORIGIN_REQUESTER)
+        self.assertEqual(str(watcher.target_id), self.SEC_REQUESTER)
+        self.assertEqual(watcher.target_name, 'TI')
+        self.assertEqual(watcher.kind, TicketWatcher.KIND_SECTOR)
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_colleague_of_requester_sector_sees_the_ticket(self, _n, _ns):
+        # Ponta a ponta: prova a demanda em si — colega do MESMO setor de quem
+        # abriu, com outro user_id, passa a enxergar o chamado na listagem.
+        resp = self._create_ticket()
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        created = Ticket.objects.get(subject='Novo')
+        colleague = make_user_with_sector(OTHER_ID, self.SEC_REQUESTER, sector_name='TI')
+        self.client.force_authenticate(user=colleague)
+        resp = self.client.get(reverse('ticket-list'))
+        self.assertEqual(resp.data['count'], 1)
+        self.assertEqual(resp.data['results'][0]['id'], created.id)
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_requester_same_sector_as_destination_creates_no_watcher(self, _n, _ns):
+        # O setor já enxerga pelo caminho normal (sector_id do ticket): gravar
+        # aqui só sujaria o painel com uma linha redundante.
+        resp = self._create_ticket(sector=self.SEC_REQUESTER, sector_name='TI')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        created = Ticket.objects.get(subject='Novo')
+        self.assertEqual(
+            created.watchers.filter(origin=TicketWatcher.ORIGIN_REQUESTER).count(), 0
+        )
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_requester_without_sector_creates_no_watcher_and_does_not_break(self, _n, _ns):
+        self.client.force_authenticate(user=make_user(OWNER_ID))
+        resp = self._create_ticket()
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        created = Ticket.objects.get(subject='Novo')
+        self.assertEqual(
+            created.watchers.filter(origin=TicketWatcher.ORIGIN_REQUESTER).count(), 0
+        )
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_creating_ticket_does_not_notify_requester_sector(self, _n, mock_sector):
+        # _notify_sector já avisa o setor DESTINO; o setor de quem abriu não
+        # pode ser notificado — viraria ruído a cada chamado aberto.
+        resp = self._create_ticket()
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        notified = [str(call.args[0]) for call in mock_sector.call_args_list]
+        self.assertNotIn(self.SEC_REQUESTER, notified)
+        self.assertIn(self.SEC_DEST, notified)
