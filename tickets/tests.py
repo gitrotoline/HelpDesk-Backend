@@ -244,6 +244,22 @@ class RelatedTicketsTests(APITestCase):
         self.assertNotIn('Sigiloso', subjects)          # assunto não vaza
         self.assertIn(secret.id, resp.data['mentions'])  # o pk continua (comportamento antigo)
 
+    def test_mentioned_in_out_of_scope_is_hidden(self):
+        # Mesma checagem do teste acima, mas na direção inversa: um chamado
+        # fora do escopo é quem menciona self.ticket. Hoje mentioned_in_detail
+        # reusa o helper _related do TicketDetailSerializer, então o filtro de
+        # visibilidade já se aplica — este teste trava a regressão caso algum
+        # dia a query de mentioned_in_detail seja duplicada em vez de reusar
+        # o helper compartilhado.
+        secret = Ticket.objects.create(
+            user_id=OTHER_ID, subject='Sigiloso', type_of_ticket=self.ttype,
+            priority=self.prio, status=self.status_open,
+        )
+        secret.mentions.add(self.ticket)
+        resp = self.client.get(reverse('ticket-detail', args=[self.ticket.id]))
+        subjects = [i['subject'] for i in resp.data['mentioned_in_detail']]
+        self.assertNotIn('Sigiloso', subjects)
+
     def test_admin_sees_related_out_of_scope(self):
         secret = Ticket.objects.create(
             user_id=OTHER_ID, subject='Sigiloso', type_of_ticket=self.ttype,
