@@ -34,6 +34,7 @@ from .models import (
 from .serializer import (
     TicketAttachmentSerializer,
     TicketCommentSerializer,
+    TicketDetailSerializer,
     TicketSerializer,
     TicketPrioritySerializer,
     TicketStatusSerializer,
@@ -105,6 +106,15 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
 
     queryset = Ticket.objects.select_related("machine", "type_of_ticket", "priority", "status").prefetch_related("attachments").all()
     serializer_class = TicketSerializer
+
+    def get_serializer_class(self):
+        # Só o detalhe traz os relacionados; na listagem isso seria N+1.
+        # close/reopen respondem com self.action = 'close'/'reopen' e seguem
+        # usando o serializer normal — o front dá refresh depois de qualquer forma.
+        if self.action == 'retrieve':
+            return TicketDetailSerializer
+        return self.serializer_class
+
     filterset_class = TicketFilter
     search_fields = ["subject", "description"]
     ordering_fields = ["created_at", "priority"]

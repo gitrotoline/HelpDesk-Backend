@@ -1,3 +1,5 @@
+from django.db.models import Count
+
 from rest_framework import serializers
 
 from .attachments import (
@@ -16,6 +18,7 @@ from .models import (
     TicketRecipient,
     TicketType,
 )
+from .scope import ticket_visibility_q
 
 
 class TicketAttachmentSerializer(serializers.ModelSerializer):
@@ -138,3 +141,41 @@ class TicketCommentSerializer(serializers.ModelSerializer):
             "created_at", "updated_at", "attachments",
         ]
         read_only_fields = ["user_id", "user_name", "created_at", "updated_at"]
+
+
+class TicketRelatedSerializer(serializers.ModelSerializer):
+    """Resumo de um chamado relacionado — cabeçalho, sem descrição nem thread.
+    As mensagens são buscadas sob demanda pelo front em /tickets/comments/."""
+    status_name = serializers.CharField(source='status.name', read_only=True)
+    priority_name = serializers.CharField(source='priority.name', read_only=True)
+    comments_count = serializers.IntegerField(read_only=True)  # vem do annotate
+
+    class Meta:
+        model = Ticket
+        fields = [
+            'id', 'subject', 'status_name', 'priority_name',
+            'user_name', 'sector_name', 'created_at', 'closed_at',
+            'comments_count',
+        ]
+
+
+class TicketDetailSerializer(TicketSerializer):
+    """TicketSerializer + os relacionados. Usado só no retrieve (ver views.py):
+    os dois campos custam 2 queries por objeto, o que na listagem seria N+1."""
+    mentions_detail = serializers.SerializerMethodField()
+
+    def _related(self, manager):
+        # Filtra pela MESMA regra de visibilidade dos chamados: sem isso, a
+        # menção viraria uma porta lateral para ler chamado de outro setor.
+        user = self.context['request'].user
+        qs = (
+            manager.filter(ticket_visibility_q(user))
+            .select_related('status', 'priority')
+            .annotate(comments_count=Count('comments', distinct=True))
+            .distinct()  # o Q de visibilidade faz JOIN com recipients e repete linhas
+            .order_by('-created_at')
+        )
+        return TicketRelatedSerializer(qs, many=True).data
+
+    def get_mentions_detail(self, obj):
+        return self._related(obj.mentions)

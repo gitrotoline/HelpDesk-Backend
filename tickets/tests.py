@@ -185,3 +185,36 @@ class TicketCreateWithAttachmentTests(APITestCase):
         self.assertEqual(att.key, 'tickets/attachments/xyz/foto.png')
         self.assertEqual(att.name, 'foto.png')
         self.assertTrue(ticket.recipients.filter(user_id=OTHER_ID).exists())
+
+
+class RelatedTicketsTests(APITestCase):
+    def setUp(self):
+        self.ttype = TicketType.objects.create(name='Problema')
+        self.prio = TicketPriority.objects.create(name='Alta')
+        self.status_open = TicketStatus.objects.create(name='Aberto', is_default=True)
+        # sector_id=None evita o notify_sector (que faria chamada HTTP).
+        self.ticket = Ticket.objects.create(
+            user_id=OWNER_ID, subject='Principal', type_of_ticket=self.ttype,
+            priority=self.prio, status=self.status_open,
+        )
+        self.related = Ticket.objects.create(
+            user_id=OWNER_ID, subject='Troca do toner', type_of_ticket=self.ttype,
+            priority=self.prio, status=self.status_open,
+        )
+        self.ticket.mentions.add(self.related)
+        self.client.force_authenticate(user=make_user())
+
+    def test_detail_returns_mentions_detail_with_subject_and_comments_count(self):
+        TicketComment.objects.create(
+            ticket=self.related, user_id=OWNER_ID, user_name='Test User', body='oi'
+        )
+        resp = self.client.get(reverse('ticket-detail', args=[self.ticket.id]))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(resp.data['mentions_detail']), 1)
+        item = resp.data['mentions_detail'][0]
+        self.assertEqual(item['id'], self.related.id)
+        self.assertEqual(item['subject'], 'Troca do toner')
+        self.assertEqual(item['status_name'], 'Aberto')
+        self.assertEqual(item['comments_count'], 1)
+        # O campo cru continua existindo — é o que o formulário grava.
+        self.assertEqual(resp.data['mentions'], [self.related.id])
