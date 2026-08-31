@@ -165,3 +165,48 @@ class TicketLog(BaseLog):
         db_table = 'db_ticket_log'
         verbose_name = 'Log of Ticket'
         verbose_name_plural = 'Logs of Ticket'
+
+
+class TicketWatcher(models.Model):
+    """Setor (ou departamento) acompanhando o chamado: vê e recebe os marcos, mas
+    não é o responsável — quem atende e fecha continua sendo o Ticket.sector_id.
+    Pessoa em cópia continua no TicketRecipient."""
+
+    KIND_SECTOR = 'sector'
+    KIND_DEPARTMENT = 'department'
+    KIND_CHOICES = [(KIND_SECTOR, 'Setor'), (KIND_DEPARTMENT, 'Departamento')]
+
+    ORIGIN_MANUAL = 'manual'
+    ORIGIN_DEPARTMENT = 'department'
+    ORIGIN_MENTION = 'mention'
+    ORIGIN_CHOICES = [
+        (ORIGIN_MANUAL, 'Escolhido'),
+        (ORIGIN_DEPARTMENT, 'Veio do departamento'),
+        (ORIGIN_MENTION, 'Veio de uma menção'),
+    ]
+
+    ticket = models.ForeignKey(Ticket, on_delete=models.CASCADE, related_name='watchers')
+    kind = models.CharField(max_length=20, choices=KIND_CHOICES)
+    # id do setor/departamento no auth-server: sem FK, a entidade é remota (mesmo
+    # padrão do Ticket.sector_id + sector_name).
+    target_id = models.UUIDField()
+    target_name = models.CharField(max_length=150, blank=True, default='')
+    origin = models.CharField(max_length=20, choices=ORIGIN_CHOICES, default=ORIGIN_MANUAL)
+    # De onde veio: UUID do departamento (origin=department) ou pk do chamado
+    # mencionado (origin=mention). CharField pelo mesmo motivo do
+    # Notification.target_id — guarda referências de tipos diferentes.
+    source_ref = models.CharField(max_length=64, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'db_ticket_watcher'
+        verbose_name = 'Ticket Watcher'
+        verbose_name_plural = 'Ticket Watchers'
+        constraints = [
+            models.UniqueConstraint(fields=['ticket', 'kind', 'target_id'],
+                                    name='unique_ticket_watcher')
+        ]
+        indexes = [models.Index(fields=['ticket', 'kind'])]
+
+    def __str__(self):
+        return f'#{self.ticket_id} - {self.target_name or self.target_id}'

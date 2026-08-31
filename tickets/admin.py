@@ -11,6 +11,7 @@ from .models import (
     TicketAttachment,
     TicketRecipient,
     TicketType,
+    TicketWatcher,
 )
 
 
@@ -87,3 +88,11 @@ class TicketLogAdmin(admin.ModelAdmin):
 class TicketViewAdmin(admin.ModelAdmin):
     list_display = ('ticket', 'user_id', 'viewed_at')
     list_filter = ('viewed_at',)
+
+
+@admin.register(TicketWatcher)
+class TicketWatcherAdmin(admin.ModelAdmin):
+    list_display = ('id', 'ticket', 'kind', 'target_name', 'origin', 'created_at')
+    list_filter = ('kind', 'origin')
+    search_fields = ('target_name',)
+    readonly_fields = ('created_at',)

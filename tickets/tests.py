@@ -1,6 +1,7 @@
 from unittest.mock import patch
 
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db.utils import IntegrityError
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
@@ -24,6 +25,7 @@ from .models import (
     TicketRecipient,
     TicketStatus,
     TicketType,
+    TicketWatcher,
 )
 
 OWNER_ID = '11111111-1111-1111-1111-111111111111'
@@ -366,3 +368,30 @@ class CommentScopeOnCreateTests(APITestCase):
             self.list_url, {'ticket': self.ticket.id, 'body': 'admin passou aqui'}
         )
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+
+class TicketWatcherModelTests(APITestCase):
+    def setUp(self):
+        self.ttype = TicketType.objects.create(name='Problema')
+        self.prio = TicketPriority.objects.create(name='Alta')
+        self.status_open = TicketStatus.objects.create(name='Aberto', is_default=True)
+        # sector_id=None evita o notify_sector (que faria chamada HTTP).
+        self.ticket = Ticket.objects.create(
+            user_id=OWNER_ID, subject='T', type_of_ticket=self.ttype,
+            priority=self.prio, status=self.status_open,
+        )
+
+    def test_watcher_defaults_and_uniqueness(self):
+        sector_id = '44444444-4444-4444-4444-444444444444'
+        watcher = TicketWatcher.objects.create(
+            ticket=self.ticket, kind=TicketWatcher.KIND_SECTOR,
+            target_id=sector_id, target_name='Elétrica',
+        )
+        self.assertEqual(watcher.origin, TicketWatcher.ORIGIN_MANUAL)
+        self.assertEqual(watcher.source_ref, '')
+        self.assertIn(watcher, self.ticket.watchers.all())
+        with self.assertRaises(IntegrityError):
+            TicketWatcher.objects.create(
+                ticket=self.ticket, kind=TicketWatcher.KIND_SECTOR,
+                target_id=sector_id, target_name='Elétrica (duplicado)',
+            )
