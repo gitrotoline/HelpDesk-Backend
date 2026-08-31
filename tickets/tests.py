@@ -754,9 +754,10 @@ class MentionWatcherTests(APITestCase):
         )
         self.client.force_authenticate(user=make_user())
 
+    @patch('tickets.serializer.notify_sector')
     @patch('tickets.views.notify_sector')
     @patch('tickets.views.notify')
-    def test_creating_with_mention_adds_watcher(self, _n, _ns):
+    def test_creating_with_mention_adds_watcher(self, _n, _ns, mock_serializer_notify):
         resp = self.client.post(reverse('ticket-list'), {
             'subject': 'Novo', 'type_of_ticket': self.ttype.id, 'priority': self.prio.id,
             'status': self.status_open.id, 'sector': '99999999-9999-9999-9999-999999999999',
@@ -768,10 +769,14 @@ class MentionWatcherTests(APITestCase):
         self.assertEqual(str(watcher.target_id), self.SEC_A)
         self.assertEqual(watcher.origin, TicketWatcher.ORIGIN_MENTION)
         self.assertEqual(watcher.source_ref, str(self.mentioned.id))
+        # IMPORTANT 3: setor recém-incluído via menção é notificado.
+        mock_serializer_notify.assert_called_once()
+        self.assertEqual(str(mock_serializer_notify.call_args.args[0]), self.SEC_A)
 
+    @patch('tickets.serializer.notify_sector')
     @patch('tickets.views.notify_sector')
     @patch('tickets.views.notify')
-    def test_unlinking_mention_keeps_watcher(self, _n, _ns):
+    def test_unlinking_mention_keeps_watcher(self, _n, _ns, _sns):
         # Tirar acesso em silêncio é pior que sobrar acesso: quem quiser remove à mão.
         created = Ticket.objects.create(
             user_id=OWNER_ID, subject='Novo', type_of_ticket=self.ttype,
@@ -787,3 +792,72 @@ class MentionWatcherTests(APITestCase):
         self.client.patch(reverse('ticket-detail', args=[created.id]),
                           {'mentions': []}, format='json')
         self.assertTrue(created.watchers.filter(target_id=self.SEC_A).exists())
+
+    @patch('tickets.serializer.notify_sector')
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_mentioning_invisible_ticket_creates_no_watcher(self, _n, _ns, mock_serializer_notify):
+        """CRITICAL 1: mencionar o pk de um chamado que o autor não pode ver não
+        pode criar acompanhante — isso vazava setor_id/setor_name (e a própria
+        existência) do chamado alheio via /watchers no detalhe."""
+        invisible = Ticket.objects.create(
+            user_id=OTHER_ID, subject='Sigiloso', type_of_ticket=self.ttype,
+            priority=self.prio, status=self.status_open,
+            sector_id=self.SEC_A, sector_name='Elétrica',
+        )
+        # make_user() (OWNER_ID) não é dono, não está em cópia e não tem setor:
+        # não enxerga `invisible`.
+        resp = self.client.post(reverse('ticket-list'), {
+            'subject': 'Novo', 'type_of_ticket': self.ttype.id, 'priority': self.prio.id,
+            'status': self.status_open.id, 'sector': '99999999-9999-9999-9999-999999999999',
+            'sector_name': 'TI', 'mentions': [invisible.id],
+        })
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        created = Ticket.objects.get(subject='Novo')
+        self.assertEqual(created.watchers.count(), 0)
+        mock_serializer_notify.assert_not_called()
+        detail = self.client.get(reverse('ticket-detail', args=[created.id]))
+        self.assertEqual(detail.data['watchers'], [])
+
+    @patch('tickets.serializer.notify_sector')
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_patch_without_new_mentions_does_not_resurrect_removed_watcher(self, _n, _ns, mock_serializer_notify):
+        """CRITICAL 2: remover o watcher de menção pelo DELETE e depois fazer um
+        PATCH qualquer (sem mexer em mentions) não pode recriá-lo — senão o
+        acompanhante de menção vira irremovível na prática."""
+        created = Ticket.objects.create(
+            user_id=OWNER_ID, subject='Novo', type_of_ticket=self.ttype,
+            priority=self.prio, status=self.status_open,
+            sector_id='99999999-9999-9999-9999-999999999999', sector_name='TI',
+        )
+        created.mentions.add(self.mentioned)
+        # Watcher criado pela menção (simulando o create já corrigido) e depois
+        # removido pelo dono, como faria o DELETE de /watchers/<id>/.
+        TicketWatcher.objects.create(
+            ticket=created, kind=TicketWatcher.KIND_SECTOR, target_id=self.SEC_A,
+            target_name='Elétrica', origin=TicketWatcher.ORIGIN_MENTION,
+            source_ref=str(self.mentioned.id),
+        ).delete()
+        self.client.patch(reverse('ticket-detail', args=[created.id]),
+                          {'subject': 'Novo assunto'}, format='json')
+        self.assertFalse(created.watchers.filter(target_id=self.SEC_A).exists())
+        mock_serializer_notify.assert_not_called()
+
+    @patch('tickets.serializer.notify_sector')
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_patch_with_new_mention_creates_its_watcher(self, _n, _ns, mock_serializer_notify):
+        """CRITICAL 2 (contraparte): adicionar uma menção NOVA num PATCH continua
+        criando o watcher dela normalmente."""
+        created = Ticket.objects.create(
+            user_id=OWNER_ID, subject='Novo', type_of_ticket=self.ttype,
+            priority=self.prio, status=self.status_open,
+            sector_id='99999999-9999-9999-9999-999999999999', sector_name='TI',
+        )
+        self.client.patch(reverse('ticket-detail', args=[created.id]),
+                          {'mentions': [self.mentioned.id]}, format='json')
+        watcher = created.watchers.get(kind=TicketWatcher.KIND_SECTOR)
+        self.assertEqual(str(watcher.target_id), self.SEC_A)
+        self.assertEqual(watcher.origin, TicketWatcher.ORIGIN_MENTION)
+        mock_serializer_notify.assert_called_once()

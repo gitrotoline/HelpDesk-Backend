@@ -207,6 +207,9 @@ class TicketWatcher(models.Model):
                                     name='unique_ticket_watcher')
         ]
         indexes = [models.Index(fields=['ticket', 'kind'])]
+        # MINOR 4: sem ordering explícito, a ordem de `watchers` no detalhe do
+        # chamado podia variar entre requests (depende do plano do banco).
+        ordering = ['kind', 'created_at']
 
     def __str__(self):
         return f'#{self.ticket_id} - {self.target_name or self.target_id}'

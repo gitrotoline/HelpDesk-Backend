@@ -2,6 +2,8 @@ from django.db.models import Count
 
 from rest_framework import serializers
 
+from notifications.services import notify_sector
+
 from .attachments import (
     COMMENT_ATTACHMENT_SALT,
     TICKET_ATTACHMENT_SALT,
@@ -94,11 +96,33 @@ class TicketSerializer(serializers.ModelSerializer):
         acompanhante do chamado atual. Direção única: quem foi mencionado NÃO passa
         a acompanhar quem mencionou. Não sobrescreve escolha explícita (manual),
         e desvincular depois não remove — tirar acesso em silêncio é pior que
-        sobrar acesso."""
+        sobrar acesso.
+
+        `mentioned_tickets` já deve conter só as menções NOVAS desta operação
+        (ver create/update) — sincronizar TODAS a cada chamada ressuscitaria um
+        acompanhante que o dono removeu manualmente (CRITICAL 2).
+        """
+        mentioned_tickets = list(mentioned_tickets)
+        if not mentioned_tickets:
+            return
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if user is None:
+            return
+        # CRITICAL 1: só cria acompanhante a partir de um chamado mencionado que o
+        # autor da ação PODE VER. Sem isso, mencionar o pk de um chamado alheio
+        # (fields="__all__" aceita qualquer pk) vazava o setor responsável dele
+        # via TicketWatcher — e de quebra confirmava que aquele chamado existe.
+        # Mesma regra usada em todo o resto (ticket_visibility_q).
+        visible_ids = set(
+            Ticket.objects.filter(
+                ticket_visibility_q(user), pk__in=[t.pk for t in mentioned_tickets]
+            ).values_list('pk', flat=True)
+        )
         for mentioned in mentioned_tickets:
-            if not mentioned.sector_id:
+            if mentioned.pk not in visible_ids or not mentioned.sector_id:
                 continue
-            TicketWatcher.objects.get_or_create(
+            watcher, created = TicketWatcher.objects.get_or_create(
                 ticket=ticket, kind=TicketWatcher.KIND_SECTOR,
                 target_id=mentioned.sector_id,
                 defaults={
@@ -107,6 +131,15 @@ class TicketSerializer(serializers.ModelSerializer):
                     'source_ref': str(mentioned.pk),
                 },
             )
+            if created:
+                # IMPORTANT 3: "incluído como acompanhante" notifica (spec §5) —
+                # reusa o mesmo fan-out do add_watcher (notify_sector) em vez de
+                # duplicar a lógica de notificação aqui.
+                notify_sector(
+                    watcher.target_id, 'ticket', ticket.pk,
+                    f'Você foi incluído no chamado #{ticket.pk}',
+                    user, getattr(user, 'auth_header', None),
+                )
 
     def create(self, validated_data):
         recipients = validated_data.pop('recipients', [])
@@ -115,8 +148,8 @@ class TicketSerializer(serializers.ModelSerializer):
             validated_data['sector_id'] = sector
         ticket = super().create(validated_data)
         self._sync_recipients(ticket, recipients)
-        # As menções (M2M) já foram gravadas pelo DRF antes de chegar aqui;
-        # só reagimos ao resultado.
+        # As menções (M2M) já foram gravadas pelo DRF antes de chegar aqui; no
+        # create todas são novas, então reagimos ao resultado inteiro.
         self._sync_mention_watchers(ticket, ticket.mentions.all())
         return ticket
 
@@ -126,10 +159,16 @@ class TicketSerializer(serializers.ModelSerializer):
         recipients = validated_data.pop('recipients', None)
         if 'sector' in validated_data:
             validated_data['sector_id'] = validated_data.pop('sector')
+        # CRITICAL 2: captura as menções ANTES do save — só sincronizamos as que
+        # foram ADICIONADAS nesta operação. Sincronizar `ticket.mentions.all()`
+        # (todas, sempre) fazia um PATCH qualquer ressuscitar um acompanhante de
+        # menção que o dono tinha acabado de remover pelo DELETE.
+        previous_mention_ids = set(instance.mentions.values_list('pk', flat=True))
         ticket = super().update(instance, validated_data)
         if recipients is not None:
             self._sync_recipients(ticket, recipients)
-        self._sync_mention_watchers(ticket, ticket.mentions.all())
+        new_mentions = ticket.mentions.exclude(pk__in=previous_mention_ids)
+        self._sync_mention_watchers(ticket, new_mentions)
         return ticket
 
 

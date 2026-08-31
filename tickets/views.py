@@ -109,7 +109,9 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
     """CRUD de chamados. Dá list/retrieve/create/update/destroy de graça,
     com paginação, filtro (TicketFilter), busca (search_fields) e ordenação."""
 
-    queryset = Ticket.objects.select_related("machine", "type_of_ticket", "priority", "status").prefetch_related("attachments").all()
+    # MINOR 5: prefetch_related('watchers') estava faltando (spec) — sem ele, o
+    # detalhe do chamado disparava uma query extra de watchers por objeto.
+    queryset = Ticket.objects.select_related("machine", "type_of_ticket", "priority", "status").prefetch_related("attachments", "watchers").all()
     serializer_class = TicketSerializer
     filterset_class = TicketFilter
     search_fields = ["subject", "description"]
