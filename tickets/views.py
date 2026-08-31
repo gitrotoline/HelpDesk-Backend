@@ -1,5 +1,8 @@
+import uuid
+
 from django.core import signing
 from django.core.cache import cache
+from django.db import transaction
 from django.db.models import Avg, Count, DurationField, Exists, ExpressionWrapper, F, OuterRef
 from django.http import Http404, StreamingHttpResponse
 from django.shortcuts import get_object_or_404
@@ -184,6 +187,27 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
             self.request.user,
             self.request.user.auth_header,
         )
+
+
+    def _upsert_sector_watcher(self, ticket, sector_id, name, origin, source_ref):
+        """Grava o acompanhante de setor respeitando o princípio: escolha explícita
+        (manual) ganha de expansão automática. Manual promove o que era derivado;
+        derivado nunca rebaixa o que era manual."""
+        watcher, created = TicketWatcher.objects.get_or_create(
+            ticket=ticket, kind=TicketWatcher.KIND_SECTOR, target_id=sector_id,
+            defaults={'target_name': name, 'origin': origin, 'source_ref': source_ref},
+        )
+        if not created and origin == TicketWatcher.ORIGIN_MANUAL \
+                and watcher.origin != TicketWatcher.ORIGIN_MANUAL:
+            watcher.origin = TicketWatcher.ORIGIN_MANUAL
+            watcher.source_ref = ''
+            watcher.save(update_fields=['origin', 'source_ref'])
+        # MINOR 4: se o setor entrou sem nome (ex.: watcher manual sem target_name) e só
+        # depois a expansão do departamento trouxe o nome, preenche em vez de deixar em branco.
+        if not created and not watcher.target_name and name:
+            watcher.target_name = name
+            watcher.save(update_fields=['target_name'])
+        return watcher
 
 
     def perform_create(self, serializer):
@@ -385,11 +409,23 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
         # — dono, setor do ticket ou cópia): editar é mais restrito (_assert_can_edit,
         # só dono/admin), então quem só vê o chamado tem que cair em 403, não 404.
         ticket = get_object_or_404(Ticket, pk=pk)
+        # MINOR 7: gancho de permissão de objeto — hoje as permission classes em uso não
+        # implementam has_object_permission, mas se uma futura implementar, tem que valer aqui.
+        self.check_object_permissions(request, ticket)
         self._assert_can_edit(ticket)
         kind = request.data.get('kind')
         target_id = request.data.get('target_id')
         if kind not in (TicketWatcher.KIND_SECTOR, TicketWatcher.KIND_DEPARTMENT) or not target_id:
             return Response({'detail': 'kind e target_id são obrigatórios.'},
+                            status=http_status.HTTP_400_BAD_REQUEST)
+
+        # IMPORTANT 1: target_id vem do request e cai direto num UUIDField no
+        # get_or_create — sem validar o formato, um valor inválido estoura na
+        # montagem da query (500) em vez de devolver um 400 claro.
+        try:
+            uuid.UUID(str(target_id))
+        except (ValueError, AttributeError, TypeError):
+            return Response({'detail': 'target_id precisa ser um UUID válido.'},
                             status=http_status.HTTP_400_BAD_REQUEST)
 
         if kind == TicketWatcher.KIND_SECTOR:
@@ -408,39 +444,44 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
             if not sectors:
                 return Response({'detail': 'Este departamento não tem setores ativos.'},
                                 status=http_status.HTTP_400_BAD_REQUEST)
-            TicketWatcher.objects.get_or_create(
-                ticket=ticket, kind=TicketWatcher.KIND_DEPARTMENT, target_id=target_id,
-                defaults={'target_name': request.data.get('target_name', ''),
-                          'origin': TicketWatcher.ORIGIN_MANUAL},
-            )
-            for sector in sectors:
-                self._upsert_sector_watcher(ticket, sector['id'], sector.get('name', ''),
-                                            TicketWatcher.ORIGIN_DEPARTMENT, str(target_id))
+            # IMPORTANT 3: a linha do departamento + as N linhas de setor derivadas
+            # precisam ser gravadas atomicamente — sem ATOMIC_REQUESTS no settings,
+            # um erro no meio do loop deixaria estado parcial (departamento sem
+            # todos os setores, ou setores órfãos).
+            with transaction.atomic():
+                # IMPORTANT 2: usa o target_id devolvido pelo próprio get_or_create
+                # (forma canônica do UUIDField: minúscula, com hífens) como source_ref
+                # dos setores derivados — não a string crua que o cliente mandou. Do
+                # contrário, um UUID em maiúsculas/sem hífens no POST faz o DELETE
+                # (que compara com str(watcher.target_id), sempre canônico) não bater,
+                # deixando os setores derivados como lixo inalcançável pela UI.
+                dept_row, _ = TicketWatcher.objects.get_or_create(
+                    ticket=ticket, kind=TicketWatcher.KIND_DEPARTMENT, target_id=target_id,
+                    defaults={'target_name': request.data.get('target_name', ''),
+                              'origin': TicketWatcher.ORIGIN_MANUAL},
+                )
+                dept_source_ref = str(dept_row.target_id)
+                for sector in sectors:
+                    self._upsert_sector_watcher(ticket, sector['id'], sector.get('name', ''),
+                                                TicketWatcher.ORIGIN_DEPARTMENT, dept_source_ref)
 
         self._notify_watchers(ticket, f'Você foi incluído no chamado #{ticket.pk}')
-        return Response(self.get_serializer(ticket).data, status=http_status.HTTP_201_CREATED)
-
-    def _upsert_sector_watcher(self, ticket, sector_id, name, origin, source_ref):
-        """Grava o acompanhante de setor respeitando o princípio: escolha explícita
-        (manual) ganha de expansão automática. Manual promove o que era derivado;
-        derivado nunca rebaixa o que era manual."""
-        watcher, created = TicketWatcher.objects.get_or_create(
-            ticket=ticket, kind=TicketWatcher.KIND_SECTOR, target_id=sector_id,
-            defaults={'target_name': name, 'origin': origin, 'source_ref': source_ref},
+        # MINOR 6: responde explicitamente com o TicketDetailSerializer — get_serializer_class
+        # só devolve ele quando self.action == 'retrieve', então o get_serializer genérico
+        # aqui devolveria o TicketSerializer, sem a lista de watchers atualizada.
+        return Response(
+            TicketDetailSerializer(ticket, context=self.get_serializer_context()).data,
+            status=http_status.HTTP_201_CREATED,
         )
-        if not created and origin == TicketWatcher.ORIGIN_MANUAL \
-                and watcher.origin != TicketWatcher.ORIGIN_MANUAL:
-            watcher.origin = TicketWatcher.ORIGIN_MANUAL
-            watcher.source_ref = ''
-            watcher.save(update_fields=['origin', 'source_ref'])
-        return watcher
 
     @action(detail=True, methods=['delete'],
-            url_path=r'watchers/(?P<watcher_id>[^/.]+)', url_name='watcher-detail')
+            url_path=r'watchers/(?P<watcher_id>[0-9]+)', url_name='watcher-detail')
     def remove_watcher(self, request, pk=None, watcher_id=None):
         """Remove o acompanhante. Removendo um departamento saem também os setores
         que ELE gerou — os promovidos a manual ficam, porque foram escolhidos."""
         ticket = get_object_or_404(Ticket, pk=pk)  # ver add_watcher: mesmo motivo
+        # MINOR 7: mesmo gancho de permissão de objeto do add_watcher.
+        self.check_object_permissions(request, ticket)
         self._assert_can_edit(ticket)
         watcher = get_object_or_404(TicketWatcher, ticket=ticket, pk=watcher_id)
         if watcher.kind == TicketWatcher.KIND_DEPARTMENT:

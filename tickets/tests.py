@@ -463,16 +463,14 @@ class TicketWatcherApiTests(APITestCase):
         self.client.force_authenticate(user=make_user())
         self.url = reverse('ticket-watchers', args=[self.ticket.id])
 
-    @patch('tickets.views.notify_sector')
-    def test_add_sector_watcher(self, _ns):
+    def test_add_sector_watcher(self):
         resp = self.client.post(self.url, {'kind': 'sector', 'target_id': self.SEC_A})
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
         watcher = TicketWatcher.objects.get(ticket=self.ticket)
         self.assertEqual(watcher.origin, TicketWatcher.ORIGIN_MANUAL)
 
-    @patch('tickets.views.notify_sector')
     @patch('tickets.views.list_department_sectors')
-    def test_add_department_expands_and_keeps_origin_row(self, mock_list, _ns):
+    def test_add_department_expands_and_keeps_origin_row(self, mock_list):
         mock_list.return_value = [
             {'id': self.SEC_A, 'name': 'Elétrica'}, {'id': self.SEC_B, 'name': 'Mecânica'},
         ]
@@ -497,9 +495,8 @@ class TicketWatcherApiTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(self.ticket.watchers.count(), 0)
 
-    @patch('tickets.views.notify_sector')
     @patch('tickets.views.list_department_sectors')
-    def test_expansion_does_not_downgrade_manual_sector(self, mock_list, _ns):
+    def test_expansion_does_not_downgrade_manual_sector(self, mock_list):
         # Escolha explícita ganha de expansão automática.
         TicketWatcher.objects.create(
             ticket=self.ticket, kind='sector', target_id=self.SEC_A,
@@ -510,8 +507,7 @@ class TicketWatcherApiTests(APITestCase):
         watcher = self.ticket.watchers.get(kind='sector', target_id=self.SEC_A)
         self.assertEqual(watcher.origin, TicketWatcher.ORIGIN_MANUAL)
 
-    @patch('tickets.views.notify_sector')
-    def test_adding_manually_promotes_derived_sector(self, _ns):
+    def test_adding_manually_promotes_derived_sector(self):
         TicketWatcher.objects.create(
             ticket=self.ticket, kind='sector', target_id=self.SEC_A, target_name='Elétrica',
             origin=TicketWatcher.ORIGIN_DEPARTMENT, source_ref=self.DEPT,
@@ -521,9 +517,8 @@ class TicketWatcherApiTests(APITestCase):
         self.assertEqual(watcher.origin, TicketWatcher.ORIGIN_MANUAL)
         self.assertEqual(watcher.source_ref, '')
 
-    @patch('tickets.views.notify_sector')
     @patch('tickets.views.list_department_sectors')
-    def test_removing_department_keeps_promoted_sector(self, mock_list, _ns):
+    def test_removing_department_keeps_promoted_sector(self, mock_list):
         mock_list.return_value = [
             {'id': self.SEC_A, 'name': 'Elétrica'}, {'id': self.SEC_B, 'name': 'Mecânica'},
         ]
@@ -547,3 +542,50 @@ class TicketWatcherApiTests(APITestCase):
         self.client.force_authenticate(user=make_user(user_id=OTHER_ID))
         resp = self.client.post(self.url, {'kind': 'sector', 'target_id': self.SEC_A})
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_invalid_target_id_returns_400_instead_of_500(self):
+        # IMPORTANT 1: target_id malformado não pode estourar na montagem da query.
+        resp = self.client.post(self.url, {'kind': 'sector', 'target_id': 'abc'})
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_missing_kind_or_target_id_returns_400(self):
+        resp = self.client.post(self.url, {'target_id': self.SEC_A})
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        resp = self.client.post(self.url, {'kind': 'sector'})
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    @patch('tickets.views.list_department_sectors')
+    def test_removing_department_saved_with_uppercase_uuid_clears_derived_sectors(self, mock_list):
+        # IMPORTANT 2: o cliente manda o UUID do departamento em MAIÚSCULAS; o
+        # source_ref das linhas derivadas tem que usar a forma canônica (get_or_create),
+        # senão o DELETE (que compara com str(watcher.target_id), sempre canônico)
+        # não bate e os setores derivados viram lixo inalcançável.
+        mock_list.return_value = [
+            {'id': self.SEC_A, 'name': 'Elétrica'}, {'id': self.SEC_B, 'name': 'Mecânica'},
+        ]
+        resp = self.client.post(self.url, {'kind': 'department', 'target_id': self.DEPT.upper()})
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        dept_row = self.ticket.watchers.get(kind='department')
+        detail = reverse('ticket-watcher-detail', args=[self.ticket.id, dept_row.id])
+        resp = self.client.delete(detail)
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(self.ticket.watchers.count(), 0)
+
+    def test_remove_sector_watcher(self):
+        watcher = TicketWatcher.objects.create(
+            ticket=self.ticket, kind='sector', target_id=self.SEC_A, target_name='Elétrica',
+        )
+        detail = reverse('ticket-watcher-detail', args=[self.ticket.id, watcher.id])
+        resp = self.client.delete(detail)
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(self.ticket.watchers.count(), 0)
+
+    def test_outsider_cannot_remove_watcher(self):
+        watcher = TicketWatcher.objects.create(
+            ticket=self.ticket, kind='sector', target_id=self.SEC_A, target_name='Elétrica',
+        )
+        self.client.force_authenticate(user=make_user(user_id=OTHER_ID))
+        detail = reverse('ticket-watcher-detail', args=[self.ticket.id, watcher.id])
+        resp = self.client.delete(detail)
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(self.ticket.watchers.count(), 1)
