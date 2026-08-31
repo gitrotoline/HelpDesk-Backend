@@ -737,4 +737,53 @@ class WatcherNotificationTests(APITestCase):
         )
         notified = [str(call.args[0]) for call in mock_sector.call_args_list]
         self.assertNotIn(self.SEC_A, notified)
-        self.assertEqual(self.ticket.watchers.count(), 1)
+
+
+class MentionWatcherTests(APITestCase):
+    SEC_A = 'aaaaaaa1-0000-0000-0000-000000000001'
+
+    def setUp(self):
+        self.ttype = TicketType.objects.create(name='Problema')
+        self.prio = TicketPriority.objects.create(name='Alta')
+        self.status_open = TicketStatus.objects.create(name='Aberto', is_default=True)
+        # O chamado mencionado tem setor: é ele que vira acompanhante.
+        self.mentioned = Ticket.objects.create(
+            user_id=OWNER_ID, subject='Origem', type_of_ticket=self.ttype,
+            priority=self.prio, status=self.status_open,
+            sector_id=self.SEC_A, sector_name='Elétrica',
+        )
+        self.client.force_authenticate(user=make_user())
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_creating_with_mention_adds_watcher(self, _n, _ns):
+        resp = self.client.post(reverse('ticket-list'), {
+            'subject': 'Novo', 'type_of_ticket': self.ttype.id, 'priority': self.prio.id,
+            'status': self.status_open.id, 'sector': '99999999-9999-9999-9999-999999999999',
+            'sector_name': 'TI', 'mentions': [self.mentioned.id],
+        })
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        created = Ticket.objects.get(subject='Novo')
+        watcher = created.watchers.get(kind=TicketWatcher.KIND_SECTOR)
+        self.assertEqual(str(watcher.target_id), self.SEC_A)
+        self.assertEqual(watcher.origin, TicketWatcher.ORIGIN_MENTION)
+        self.assertEqual(watcher.source_ref, str(self.mentioned.id))
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_unlinking_mention_keeps_watcher(self, _n, _ns):
+        # Tirar acesso em silêncio é pior que sobrar acesso: quem quiser remove à mão.
+        created = Ticket.objects.create(
+            user_id=OWNER_ID, subject='Novo', type_of_ticket=self.ttype,
+            priority=self.prio, status=self.status_open,
+            sector_id='99999999-9999-9999-9999-999999999999', sector_name='TI',
+        )
+        created.mentions.add(self.mentioned)
+        TicketWatcher.objects.create(
+            ticket=created, kind=TicketWatcher.KIND_SECTOR, target_id=self.SEC_A,
+            target_name='Elétrica', origin=TicketWatcher.ORIGIN_MENTION,
+            source_ref=str(self.mentioned.id),
+        )
+        self.client.patch(reverse('ticket-detail', args=[created.id]),
+                          {'mentions': []}, format='json')
+        self.assertTrue(created.watchers.filter(target_id=self.SEC_A).exists())

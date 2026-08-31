@@ -89,6 +89,25 @@ class TicketSerializer(serializers.ModelSerializer):
             TicketRecipient(ticket=ticket, user_id=user_id) for user_id in set(recipients)
         )
 
+    def _sync_mention_watchers(self, ticket, mentioned_tickets):
+        """Vincular uma menção inclui o setor do chamado mencionado como
+        acompanhante do chamado atual. Direção única: quem foi mencionado NÃO passa
+        a acompanhar quem mencionou. Não sobrescreve escolha explícita (manual),
+        e desvincular depois não remove — tirar acesso em silêncio é pior que
+        sobrar acesso."""
+        for mentioned in mentioned_tickets:
+            if not mentioned.sector_id:
+                continue
+            TicketWatcher.objects.get_or_create(
+                ticket=ticket, kind=TicketWatcher.KIND_SECTOR,
+                target_id=mentioned.sector_id,
+                defaults={
+                    'target_name': mentioned.sector_name,
+                    'origin': TicketWatcher.ORIGIN_MENTION,
+                    'source_ref': str(mentioned.pk),
+                },
+            )
+
     def create(self, validated_data):
         recipients = validated_data.pop('recipients', [])
         sector = validated_data.pop('sector', None)
@@ -96,6 +115,9 @@ class TicketSerializer(serializers.ModelSerializer):
             validated_data['sector_id'] = sector
         ticket = super().create(validated_data)
         self._sync_recipients(ticket, recipients)
+        # As menções (M2M) já foram gravadas pelo DRF antes de chegar aqui;
+        # só reagimos ao resultado.
+        self._sync_mention_watchers(ticket, ticket.mentions.all())
         return ticket
 
     def update(self, instance, validated_data):
@@ -107,6 +129,7 @@ class TicketSerializer(serializers.ModelSerializer):
         ticket = super().update(instance, validated_data)
         if recipients is not None:
             self._sync_recipients(ticket, recipients)
+        self._sync_mention_watchers(ticket, ticket.mentions.all())
         return ticket
 
 
