@@ -52,6 +52,15 @@ def make_user(user_id=OWNER_ID, is_superuser=False, permissions=None):
     })
 
 
+def make_user_with_sector(user_id, sector_id, sector_name='Elétrica'):
+    # O RemoteUser lê o setor do claim `sector` do JWT (authentication/auth.py).
+    return RemoteUser({
+        'user_id': str(user_id), 'first_name': 'Test', 'last_name': 'User',
+        'is_superuser': False, 'permissions': [],
+        'sector': {'id': str(sector_id), 'name': sector_name},
+    })
+
+
 class BuildKeyTests(APITestCase):
     def test_build_key_is_unique_and_keeps_filename(self):
         k1 = build_key('tickets/comments', 'relatorio final.pdf')
@@ -591,4 +600,68 @@ class TicketWatcherApiTests(APITestCase):
         detail = reverse('ticket-watcher-detail', args=[self.ticket.id, watcher.id])
         resp = self.client.delete(detail)
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class WatcherVisibilityTests(APITestCase):
+    SEC_A = 'aaaaaaa1-0000-0000-0000-000000000001'
+
+    def setUp(self):
+        self.ttype = TicketType.objects.create(name='Problema')
+        self.prio = TicketPriority.objects.create(name='Alta')
+        self.status_open = TicketStatus.objects.create(name='Aberto', is_default=True)
+        self.ticket = Ticket.objects.create(
+            user_id=OWNER_ID, subject='Do outro', type_of_ticket=self.ttype,
+            priority=self.prio, status=self.status_open,
+        )
+        # OTHER_ID é de outro setor: sem acompanhar, não vê nada deste chamado.
+        self.outsider = make_user_with_sector(OTHER_ID, self.SEC_A)
+
+    def _watch(self, kind=TicketWatcher.KIND_SECTOR, target_id=None):
+        return TicketWatcher.objects.create(
+            ticket=self.ticket, kind=kind, target_id=target_id or self.SEC_A,
+            target_name='Elétrica',
+        )
+
+    def test_watcher_sector_member_sees_ticket(self):
+        self._watch()
+        self.client.force_authenticate(user=self.outsider)
+        resp = self.client.get(reverse('ticket-list'))
+        self.assertEqual([t['id'] for t in resp.data['results']], [self.ticket.id])
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_watcher_sector_member_can_comment(self, _n, _ns):
+        # Consequência da visibilidade: o perform_create do comentário valida escopo.
+        self._watch()
+        self.client.force_authenticate(user=self.outsider)
+        resp = self.client.post(
+            reverse('ticket-comment-list'), {'ticket': self.ticket.id, 'body': 'ajudo aqui'}
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    def test_department_row_alone_grants_nothing(self):
+        # A linha de departamento é só registro de origem: o token traz setor, não
+        # departamento, então ela nunca casa com ninguém. Quem dá acesso são os
+        # setores expandidos.
+        self._watch(kind=TicketWatcher.KIND_DEPARTMENT,
+                    target_id='55555555-5555-5555-5555-555555555555')
+        self.client.force_authenticate(user=self.outsider)
+        resp = self.client.get(reverse('ticket-list'))
+        self.assertEqual(resp.data['count'], 0)
+
+    def test_removing_watcher_removes_access(self):
+        watcher = self._watch()
+        watcher.delete()
+        self.client.force_authenticate(user=self.outsider)
+        resp = self.client.get(reverse('ticket-list'))
+        self.assertEqual(resp.data['count'], 0)
+
+    def test_ticket_is_not_duplicated_in_listing(self):
+        # O Q agora faz JOIN com recipients E watchers: sem distinct(), o mesmo
+        # chamado apareceria repetido para quem casa em mais de um caminho.
+        self._watch()
+        TicketRecipient.objects.create(ticket=self.ticket, user_id=OTHER_ID)
+        self.client.force_authenticate(user=self.outsider)
+        resp = self.client.get(reverse('ticket-list'))
+        self.assertEqual(resp.data['count'], 1)
         self.assertEqual(self.ticket.watchers.count(), 1)

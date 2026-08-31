@@ -19,4 +19,9 @@ def ticket_visibility_q(user, prefix=''):
     # setor vem do JWT (RemoteUser.sector); pode ser None se o usuário não tem.
     if user.sector and user.sector.id:
         scope |= Q(**{field('sector_id'): user.sector.id})
+        # Acompanhantes: só as linhas de setor concedem acesso. A linha de
+        # departamento é registro de origem — o token traz setor, não
+        # departamento, então ela nunca casaria com ninguém.
+        scope |= Q(**{field('watchers__kind'): 'sector',
+                      field('watchers__target_id'): user.sector.id})
     return scope
