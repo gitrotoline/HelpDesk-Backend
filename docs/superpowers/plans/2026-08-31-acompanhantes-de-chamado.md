@@ -412,7 +412,9 @@ Em `tickets/views.py`, no `TicketViewSet` (imports novos: `TicketWatcher` de
 `.models`, `list_department_sectors` de `sector.services`):
 
 ```python
-    @action(detail=True, methods=['post'], url_path='watchers')
+    # url_name explícito: sem ele o nome da rota seria 'ticket-add-watcher'
+    # (DRF deriva do nome do método), e os testes usam reverse('ticket-watchers').
+    @action(detail=True, methods=['post'], url_path='watchers', url_name='watchers')
     def add_watcher(self, request, pk=None):
         """Inclui um setor — ou um departamento, que é expandido nos setores dele."""
         ticket = self.get_object()
