@@ -64,6 +64,7 @@ python manage.py migrate
 python manage.py ticket_refs       # status, prioridades e tipos de ticket
 python manage.py country           # países
 python manage.py state_and_city    # estados e cidades
+python manage.py machine_refs      # tamanhos e modelos de máquina
 ```
 
 ## Confirmar

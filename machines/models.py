@@ -58,6 +58,7 @@ class MachineOptional(models.Model):
 
 class MachineModel(models.Model):
     name = models.CharField(max_length=100)
+    acronym = models.CharField(max_length=5)
 
     class Meta:
         db_table = 'db_machine_model'
