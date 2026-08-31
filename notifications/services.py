@@ -5,8 +5,15 @@ from .models import Notification
 
 def notify(recipient_ids, category, target_id, message, actor):
     """Cria 1 notificação por destinatário (sem duplicar). `actor` é quem disparou
-    a ação (RemoteUser do auth-server); guardamos id/nome só para exibição."""
-    recipients = {str(uid) for uid in recipient_ids if uid}
+    a ação (RemoteUser do auth-server); guardamos id/nome só para exibição.
+
+    Ninguém é notificado da própria ação. A regra fica aqui, e não em cada
+    chamador, porque só o `perform_create` de comentário filtrava o autor — os
+    outros caminhos (fechar, reabrir, e o fan-out de setor) notificavam quem
+    tinha acabado de agir.
+    """
+    actor_id = str(actor.id) if actor is not None else None
+    recipients = {str(uid) for uid in recipient_ids if uid} - {actor_id}
     Notification.objects.bulk_create(
         Notification(
             recipient_id=uid,
