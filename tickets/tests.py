@@ -475,14 +475,16 @@ class TicketWatcherApiTests(APITestCase):
         self.client.force_authenticate(user=make_user())
         self.url = reverse('ticket-watchers', args=[self.ticket.id])
 
-    def test_add_sector_watcher(self):
+    @patch('tickets.views.notify_sector')
+    def test_add_sector_watcher(self, _ns):
         resp = self.client.post(self.url, {'kind': 'sector', 'target_id': self.SEC_A})
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
         watcher = TicketWatcher.objects.get(ticket=self.ticket)
         self.assertEqual(watcher.origin, TicketWatcher.ORIGIN_MANUAL)
 
+    @patch('tickets.views.notify_sector')
     @patch('tickets.views.list_department_sectors')
-    def test_add_department_expands_and_keeps_origin_row(self, mock_list):
+    def test_add_department_expands_and_keeps_origin_row(self, mock_list, _ns):
         mock_list.return_value = [
             {'id': self.SEC_A, 'name': 'Elétrica'}, {'id': self.SEC_B, 'name': 'Mecânica'},
         ]
@@ -507,8 +509,9 @@ class TicketWatcherApiTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(self.ticket.watchers.count(), 0)
 
+    @patch('tickets.views.notify_sector')
     @patch('tickets.views.list_department_sectors')
-    def test_expansion_does_not_downgrade_manual_sector(self, mock_list):
+    def test_expansion_does_not_downgrade_manual_sector(self, mock_list, _ns):
         # Escolha explícita ganha de expansão automática.
         TicketWatcher.objects.create(
             ticket=self.ticket, kind='sector', target_id=self.SEC_A,
@@ -519,7 +522,8 @@ class TicketWatcherApiTests(APITestCase):
         watcher = self.ticket.watchers.get(kind='sector', target_id=self.SEC_A)
         self.assertEqual(watcher.origin, TicketWatcher.ORIGIN_MANUAL)
 
-    def test_adding_manually_promotes_derived_sector(self):
+    @patch('tickets.views.notify_sector')
+    def test_adding_manually_promotes_derived_sector(self, _ns):
         TicketWatcher.objects.create(
             ticket=self.ticket, kind='sector', target_id=self.SEC_A, target_name='Elétrica',
             origin=TicketWatcher.ORIGIN_DEPARTMENT, source_ref=self.DEPT,
@@ -529,8 +533,9 @@ class TicketWatcherApiTests(APITestCase):
         self.assertEqual(watcher.origin, TicketWatcher.ORIGIN_MANUAL)
         self.assertEqual(watcher.source_ref, '')
 
+    @patch('tickets.views.notify_sector')
     @patch('tickets.views.list_department_sectors')
-    def test_removing_department_keeps_promoted_sector(self, mock_list):
+    def test_removing_department_keeps_promoted_sector(self, mock_list, _ns):
         mock_list.return_value = [
             {'id': self.SEC_A, 'name': 'Elétrica'}, {'id': self.SEC_B, 'name': 'Mecânica'},
         ]
@@ -566,8 +571,9 @@ class TicketWatcherApiTests(APITestCase):
         resp = self.client.post(self.url, {'kind': 'sector'})
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
+    @patch('tickets.views.notify_sector')
     @patch('tickets.views.list_department_sectors')
-    def test_removing_department_saved_with_uppercase_uuid_clears_derived_sectors(self, mock_list):
+    def test_removing_department_saved_with_uppercase_uuid_clears_derived_sectors(self, mock_list, _ns):
         # IMPORTANT 2: o cliente manda o UUID do departamento em MAIÚSCULAS; o
         # source_ref das linhas derivadas tem que usar a forma canônica (get_or_create),
         # senão o DELETE (que compara com str(watcher.target_id), sempre canônico)
@@ -600,6 +606,27 @@ class TicketWatcherApiTests(APITestCase):
         detail = reverse('ticket-watcher-detail', args=[self.ticket.id, watcher.id])
         resp = self.client.delete(detail)
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    @patch('tickets.views.notify_sector')
+    def test_add_watcher_notifies_newly_created_sector(self, mock_sector):
+        # IMPORTANT 2: incluir um setor novo tem que disparar a notificação de
+        # inclusão para ele, com a mensagem certa.
+        resp = self.client.post(self.url, {'kind': 'sector', 'target_id': self.SEC_A})
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        notified = [(str(call.args[0]), call.args[3]) for call in mock_sector.call_args_list]
+        self.assertIn((self.SEC_A, f'Você foi incluído no chamado #{self.ticket.pk}'), notified)
+
+    @patch('tickets.views.notify_sector')
+    def test_add_watcher_repost_does_not_renotify_existing_sector(self, mock_sector):
+        # IMPORTANT 2 (idempotência): re-POST do mesmo setor não cria linha nova
+        # (get_or_create), então não pode renotificar quem já acompanhava.
+        resp = self.client.post(self.url, {'kind': 'sector', 'target_id': self.SEC_A})
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        mock_sector.reset_mock()
+        resp = self.client.post(self.url, {'kind': 'sector', 'target_id': self.SEC_A})
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        notified = [str(call.args[0]) for call in mock_sector.call_args_list]
+        self.assertNotIn(self.SEC_A, notified)
 
 
 class WatcherVisibilityTests(APITestCase):
