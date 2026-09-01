@@ -33,19 +33,18 @@ class Ticket(models.Model):
         return f'#{self.pk} - {self.subject}'
 
 
+# Visualização do Ticket/Chamado
 class TicketView(BaseView):
-    # Uma linha por (ticket, usuário): registra quem abriu o ticket e quando.
     ticket = models.ForeignKey(Ticket, on_delete=models.CASCADE, related_name='views')
 
     class Meta(BaseView.Meta):
         db_table = 'db_ticket_view'
         verbose_name = 'Ticket View'
         verbose_name_plural = 'Ticket Views'
-        constraints = [
-            models.UniqueConstraint(fields=['ticket', 'user_id'], name='unique_ticket_view')
-        ]
+        constraints = [models.UniqueConstraint(fields=['ticket', 'user_id'], name='unique_ticket_view')]
 
 
+# Prioridade do Ticket/Chamado
 class TicketPriority(models.Model):
     name = models.CharField(max_length=80)
 
@@ -58,8 +57,8 @@ class TicketPriority(models.Model):
         return self.name
 
 
+# Anexo do Ticket/Chamado S3 (bucket privado, core/s3.py).
 class TicketAttachment(models.Model):
-    # Anexo no nível do chamado no S3 (bucket privado). Guardamos a CHAVE do objeto; a URL de leitura é uma presigned GET gerada na hora (core/s3.py).
     ticket = models.ForeignKey(Ticket, on_delete=models.CASCADE, related_name='attachments')
     key = models.CharField(max_length=600)  # chave do objeto no S3
     name = models.CharField(max_length=255, blank=True, default='')  # nome original (exibição)
@@ -74,9 +73,8 @@ class TicketAttachment(models.Model):
         return self.name or self.key
 
 
+# Comentário do Ticket/Chamado, Autor vem do auth-server (JWT),
 class TicketComment(models.Model):
-    # Resposta/comentário na thread do ticket. Autor vem do auth-server (JWT),
-    # então guardamos só o UUID + snapshot do nome — sem FK p/ usuário local.
     ticket = models.ForeignKey(Ticket, on_delete=models.CASCADE, related_name='comments')
     user_id = models.UUIDField()
     user_name = models.CharField(max_length=150, blank=True, default='')
@@ -94,9 +92,8 @@ class TicketComment(models.Model):
         return f'#{self.ticket_id} - {self.user_name}'
 
 
+# Anexo do comentário do Ticket/Chamado S3 (bucket privado, core/s3.py).
 class TicketCommentAttachment(models.Model):
-    # Anexo de um comentário no S3 (bucket privado). Guardamos a CHAVE do objeto;
-    # a URL de leitura é uma presigned GET gerada na hora (ver core/s3.py).
     comment = models.ForeignKey(TicketComment, on_delete=models.CASCADE, related_name='attachments')
     key = models.CharField(max_length=600)  # chave do objeto no S3
     name = models.CharField(max_length=255)  # nome ORIGINAL do arquivo (exibição)
@@ -111,9 +108,8 @@ class TicketCommentAttachment(models.Model):
         return self.name
 
 
+# Pessoa em copia do Ticket/Chamado
 class TicketRecipient(models.Model):
-    # Pessoa em cópia no chamado. Usuário vem do auth-server, então guardamos
-    # só o UUID — o e-mail é buscado lá na hora de notificar.
     ticket = models.ForeignKey(Ticket, on_delete=models.CASCADE, related_name='recipients')
     user_id = models.UUIDField()
 
@@ -129,12 +125,11 @@ class TicketRecipient(models.Model):
         return str(self.user_id)
 
 
+# Status do Ticket/Chamado
 class TicketStatus(models.Model):
     name = models.CharField(max_length=80)
-    # Flags usadas pelas actions close/reopen: is_default é o status de um
-    # chamado (re)aberto; is_final é o status que encerra o chamado.
-    is_default = models.BooleanField(default=False)
-    is_final = models.BooleanField(default=False)
+    is_default = models.BooleanField(default=False) # is_default é o status de um chamado (re)aberto;
+    is_final = models.BooleanField(default=False) # close/reopen:  is_final é o status que encerra o chamado.
 
     class Meta:
         db_table = 'db_ticket_status'
@@ -145,6 +140,7 @@ class TicketStatus(models.Model):
         return self.name
 
 
+# Tipo do Ticket/Chamado
 class TicketType(models.Model):
     name = models.CharField(max_length=80)
 
@@ -157,9 +153,9 @@ class TicketType(models.Model):
         return self.name
 
 
+# Logs do Ticket/Chamado
 class TicketLog(BaseLog):
-    # SET_NULL para o histórico sobreviver à exclusão do ticket — o número do ticket fica registrado no texto da action.
-    ticket = models.ForeignKey(Ticket, on_delete=models.SET_NULL, related_name='logs', null=True, blank=True)
+    ticket = models.ForeignKey(Ticket, on_delete=models.SET_NULL, related_name='logs', null=True, blank=True) # SET_NULL para o histórico sobreviver
 
     class Meta(BaseLog.Meta):
         db_table = 'db_ticket_log'
@@ -167,11 +163,8 @@ class TicketLog(BaseLog):
         verbose_name_plural = 'Logs of Ticket'
 
 
+# Acompanhante do Ticket/Chamado
 class TicketWatcher(models.Model):
-    """Setor (ou departamento) acompanhando o chamado: vê e recebe os marcos, mas
-    não é o responsável — quem atende e fecha continua sendo o Ticket.sector_id.
-    Pessoa em cópia continua no TicketRecipient."""
-
     KIND_SECTOR = 'sector'
     KIND_DEPARTMENT = 'department'
     KIND_CHOICES = [(KIND_SECTOR, 'Setor'), (KIND_DEPARTMENT, 'Departamento')]
@@ -179,9 +172,6 @@ class TicketWatcher(models.Model):
     ORIGIN_MANUAL = 'manual'
     ORIGIN_DEPARTMENT = 'department'
     ORIGIN_MENTION = 'mention'
-    # HD-31: setor de quem ABRIU o chamado, incluído automaticamente na
-    # criação quando o destino é outro setor — para o time de origem não
-    # perder a visibilidade do próprio chamado.
     ORIGIN_REQUESTER = 'requester'
     ORIGIN_CHOICES = [
         (ORIGIN_MANUAL, 'Escolhido'),
@@ -192,14 +182,9 @@ class TicketWatcher(models.Model):
 
     ticket = models.ForeignKey(Ticket, on_delete=models.CASCADE, related_name='watchers')
     kind = models.CharField(max_length=20, choices=KIND_CHOICES)
-    # id do setor/departamento no auth-server: sem FK, a entidade é remota (mesmo
-    # padrão do Ticket.sector_id + sector_name).
-    target_id = models.UUIDField()
-    target_name = models.CharField(max_length=150, blank=True, default='')
+    target_id = models.UUIDField() # Setor ou Departamento
+    target_name = models.CharField(max_length=150, blank=True, default='') # Setor ou Departamento
     origin = models.CharField(max_length=20, choices=ORIGIN_CHOICES, default=ORIGIN_MANUAL)
-    # De onde veio: UUID do departamento (origin=department) ou pk do chamado
-    # mencionado (origin=mention). CharField pelo mesmo motivo do
-    # Notification.target_id — guarda referências de tipos diferentes.
     source_ref = models.CharField(max_length=64, blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -207,13 +192,8 @@ class TicketWatcher(models.Model):
         db_table = 'db_ticket_watcher'
         verbose_name = 'Ticket Watcher'
         verbose_name_plural = 'Ticket Watchers'
-        constraints = [
-            models.UniqueConstraint(fields=['ticket', 'kind', 'target_id'],
-                                    name='unique_ticket_watcher')
-        ]
+        constraints = [models.UniqueConstraint(fields=['ticket', 'kind', 'target_id'],name='unique_ticket_watcher')]
         indexes = [models.Index(fields=['ticket', 'kind'])]
-        # MINOR 4: sem ordering explícito, a ordem de `watchers` no detalhe do
-        # chamado podia variar entre requests (depende do plano do banco).
         ordering = ['kind', 'created_at']
 
     def __str__(self):
