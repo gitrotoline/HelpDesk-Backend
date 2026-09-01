@@ -1793,3 +1793,75 @@ class ChangeStatusActionTests(APITestCase):
         self.assertIn(self.OUTSIDER_ID, notified)
         # Quem agiu não se autonotifica.
         self.assertNotIn(OTHER_ID, notified)
+
+
+class TicketLogApiTests(APITestCase):
+    """HD-31: GET /tickets/{id}/logs/ — histórico de auditoria do chamado.
+
+    Permissão é _assert_can_edit (dono ou admin), DE PROPÓSITO diferente de
+    _assert_can_handle (dono, setor OU admin) usada em close/reopen/watchers:
+    quem atende o chamado (setor) não vê o histórico. test_sector_member_gets_403
+    é o teste que trava essa decisão."""
+
+    SECTOR_ID = 'aaaaaaa1-0000-0000-0000-000000000001'
+
+    def setUp(self):
+        self.ttype = TicketType.objects.create(name='Problema')
+        self.prio = TicketPriority.objects.create(name='Alta')
+        self.status_open = TicketStatus.objects.create(name='Aberto', is_default=True)
+        self.ticket = Ticket.objects.create(
+            user_id=OWNER_ID, subject='T', type_of_ticket=self.ttype,
+            priority=self.prio, status=self.status_open, sector_id=self.SECTOR_ID,
+        )
+        # Cria os logs fora de ordem para provar que a ordenação da resposta
+        # (mais recente primeiro) não é coincidência da ordem de inserção.
+        self.log_old = TicketLog.objects.create(
+            ticket=self.ticket, user_id=OWNER_ID, user_name='Dono',
+            action='Ticket criado',
+        )
+        self.log_new = TicketLog.objects.create(
+            ticket=self.ticket, user_id=OWNER_ID, user_name='Dono',
+            action='Situação alterada para Em andamento',
+        )
+        TicketLog.objects.filter(pk=self.log_old.pk).update(
+            created_at=timezone.now() - timezone.timedelta(hours=1)
+        )
+        self.url = reverse('ticket-logs', args=[self.ticket.id])
+
+    def test_owner_reads_logs_in_order(self):
+        self.client.force_authenticate(user=make_user(user_id=OWNER_ID))
+        resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        actions = [row['action'] for row in resp.data['results']]
+        self.assertEqual(actions, [self.log_new.action, self.log_old.action])
+
+    def test_admin_reads_logs(self):
+        self.client.force_authenticate(
+            user=make_user(user_id=OTHER_ID, permissions=['user.tier_admin'])
+        )
+        resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(resp.data['results']), 2)
+
+    def test_outsider_gets_403(self):
+        self.client.force_authenticate(user=make_user(user_id=OTHER_ID))
+        resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_sector_member_gets_403(self):
+        # Distingue esta regra de _assert_can_handle: quem atende (setor do
+        # ticket) NÃO é dono nem admin, então continua fora do histórico.
+        self.client.force_authenticate(
+            user=make_user_with_sector(OTHER_ID, self.SECTOR_ID)
+        )
+        resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_response_shape(self):
+        self.client.force_authenticate(user=make_user(user_id=OWNER_ID))
+        resp = self.client.get(self.url)
+        row = resp.data['results'][0]
+        self.assertEqual(set(row.keys()), {'id', 'user_name', 'action', 'created_at'})
+        self.assertEqual(row['user_name'], 'Dono')
+        self.assertEqual(row['action'], self.log_new.action)
+        self.assertIn('created_at', row)

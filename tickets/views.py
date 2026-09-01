@@ -41,6 +41,7 @@ from .serializer import (
     TicketAttachmentSerializer,
     TicketCommentSerializer,
     TicketDetailSerializer,
+    TicketLogSerializer,
     TicketSerializer,
     TicketPrioritySerializer,
     TicketStatusSerializer,
@@ -564,6 +565,28 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
         notify([ticket.user_id], 'ticket', ticket.pk, f'Ticket #{ticket.pk} foi reaberto', request.user)
         self._notify_watchers(ticket, f'Ticket #{ticket.pk} foi reaberto')
         return Response(self.get_serializer(ticket).data)
+
+
+    # url_name explícito (mesmo motivo do add_watcher/change_status): sem ele
+    # o DRF derivaria 'ticket-logs' do nome do método — o que já confundiu
+    # nesta feature antes.
+    @action(detail=True, methods=['get'], url_path='logs', url_name='logs')
+    def logs(self, request, pk=None):
+        """HD-31: histórico de auditoria do chamado (TicketLog). Só dono ou
+        admin vê — _assert_can_edit, DE PROPÓSITO não _assert_can_handle: o
+        setor que atende o chamado não tem acesso ao histórico, isso é
+        diferente de fechar/reabrir/gerenciar acompanhantes."""
+        # Busca SEM o filtro de visibilidade do get_queryset (regra de LEITURA —
+        # dono, setor do ticket ou cópia): o histórico é mais restrito que ver o
+        # ticket (_assert_can_edit, ver abaixo), então quem só vê o chamado (ex.:
+        # setor que atende) tem que cair em 403, não 404 (mesmo padrão do add_watcher).
+        ticket = get_object_or_404(Ticket, pk=pk)
+        self.check_object_permissions(request, ticket)
+        self._assert_can_edit(ticket)
+        qs = ticket.logs.all()  # ordering já vem de BaseLog.Meta (-created_at)
+        page = self.paginate_queryset(qs)
+        serializer = TicketLogSerializer(page, many=True)
+        return self.get_paginated_response(serializer.data)
 
 
     @action(detail=False, methods=['get'])

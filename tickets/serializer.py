@@ -14,6 +14,7 @@ from .models import (
     TicketAttachment,
     TicketComment,
     TicketCommentAttachment,
+    TicketLog,
     TicketPriority,
     TicketStatus,
     Ticket,
@@ -281,6 +282,16 @@ class TicketWatcherSerializer(serializers.ModelSerializer):
     class Meta:
         model = TicketWatcher
         fields = ['id', 'kind', 'target_id', 'target_name', 'origin', 'source_ref']
+
+
+class TicketLogSerializer(serializers.ModelSerializer):
+    """HD-31: histórico de auditoria do chamado (ver TicketViewSet.logs). Não
+    expõe user_id — é UUID interno e não acrescenta nada na tela; user_name já
+    é o snapshot de exibição (BaseLog)."""
+
+    class Meta:
+        model = TicketLog
+        fields = ['id', 'user_name', 'action', 'created_at']
 
 
 class TicketDetailSerializer(TicketSerializer):
