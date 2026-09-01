@@ -98,8 +98,10 @@ class TicketPriorityViewSet(viewsets.ModelViewSet):
     queryset = TicketPriority.objects.all()
     serializer_class = TicketPrioritySerializer
     search_fields = ["name"]
-    ordering_fields = ["name"]
-    ordering = ["name"]
+    ordering_fields = ["name", "level"]
+    # HD-31: mais urgente primeiro (maior level), nome desempatando — mesma
+    # ordem do Meta.ordering do model.
+    ordering = ["-level", "name"]
 
 
 class TicketStatusViewSet(viewsets.ModelViewSet):
@@ -122,7 +124,10 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
     serializer_class = TicketSerializer
     filterset_class = TicketFilter
     search_fields = ["subject", "description"]
-    ordering_fields = ["created_at", "priority"]
+    # HD-31: "priority" ordenava pelo id da FK (ordem de cadastro, sem
+    # significado nenhum). "priority__level" ordena pelo grau de urgência,
+    # que é o que de fato importa.
+    ordering_fields = ["created_at", "priority__level"]
     ordering = ["-created_at"]
 
     attachment_model = TicketAttachment

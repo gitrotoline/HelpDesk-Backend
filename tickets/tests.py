@@ -2164,3 +2164,122 @@ class TicketWatcherLogTests(APITestCase):
         self.assertTrue(created.watchers.filter(origin=TicketWatcher.ORIGIN_MENTION).exists())
         actions = list(TicketLog.objects.filter(ticket=created).values_list('action', flat=True))
         self.assertEqual(actions, ['Chamado criado'])
+
+
+class TicketPriorityLevelTests(APITestCase):
+    """HD-31: grau numérico da prioridade (level) — quanto maior, mais urgente."""
+
+    def setUp(self):
+        self.client.force_authenticate(user=make_user())
+
+    def test_priority_list_orders_by_level_desc_then_name(self):
+        TicketPriority.objects.create(name='Baixa', level=10)
+        TicketPriority.objects.create(name='Urgente', level=40)
+        TicketPriority.objects.create(name='Alta', level=30)
+        # Duas prioridades de mesmo grau: desempate por nome (ordem alfabética).
+        TicketPriority.objects.create(name='Zeta', level=20)
+        TicketPriority.objects.create(name='Media', level=20)
+
+        resp = self.client.get(reverse('ticket-priority-list'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        names = [item['name'] for item in resp.data['results']]
+        self.assertEqual(names, ['Urgente', 'Alta', 'Media', 'Zeta', 'Baixa'])
+
+    def test_ticket_list_ordering_by_priority_level_ignores_creation_order(self):
+        # Cenário deliberado: a prioridade de grau ALTO é cadastrada DEPOIS da
+        # de grau baixo, então ela tem o id MAIOR. Se a ordenação ainda usasse
+        # `priority` (id da FK), o resultado bateria com a ordem de criação
+        # dos chamados por coincidência de id crescente == created_at
+        # crescente. Ordenar por `priority__level` é o único jeito de acertar
+        # aqui.
+        ttype = TicketType.objects.create(name='Problema')
+        status_open = TicketStatus.objects.create(name='Aberto', is_default=True)
+
+        prio_low = TicketPriority.objects.create(name='Baixa', level=10)
+        prio_high = TicketPriority.objects.create(name='Urgente', level=40)  # id maior, level maior
+
+        ticket_low = Ticket.objects.create(
+            user_id=OWNER_ID, subject='Chamado baixo', type_of_ticket=ttype,
+            priority=prio_low, status=status_open,
+        )
+        ticket_high = Ticket.objects.create(
+            user_id=OWNER_ID, subject='Chamado urgente', type_of_ticket=ttype,
+            priority=prio_high, status=status_open,
+        )
+
+        resp = self.client.get(reverse('ticket-list'), {'ordering': 'priority__level'})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ids = [item['id'] for item in resp.data['results']]
+        self.assertEqual(ids, [ticket_low.id, ticket_high.id])
+
+        resp_desc = self.client.get(reverse('ticket-list'), {'ordering': '-priority__level'})
+        ids_desc = [item['id'] for item in resp_desc.data['results']]
+        self.assertEqual(ids_desc, [ticket_high.id, ticket_low.id])
+
+    def test_priority_serializer_reads_and_writes_level(self):
+        prio = TicketPriority.objects.create(name='Alta', level=30)
+        resp = self.client.get(reverse('ticket-priority-detail', args=[prio.id]))
+        self.assertEqual(resp.data['level'], 30)
+
+        resp = self.client.patch(reverse('ticket-priority-detail', args=[prio.id]), {'level': 99})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['level'], 99)
+        prio.refresh_from_db()
+        self.assertEqual(prio.level, 99)
+
+        resp = self.client.post(reverse('ticket-priority-list'), {'name': 'Nova', 'level': 15})
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data['level'], 15)
+        self.assertEqual(TicketPriority.objects.get(name='Nova').level, 15)
+
+
+class TicketPriorityBackfillMigrationTests(APITestCase):
+    """HD-31: função de mapeamento de nome -> level usada pela migration de
+    dados 0007 (tickets/priority_levels.py). Testada diretamente, sem
+    depender de rodar a migration em si."""
+
+    def test_known_names_map_to_expected_levels(self):
+        from tickets.priority_levels import level_for_name
+
+        self.assertEqual(level_for_name('Baixa'), 10)
+        self.assertEqual(level_for_name('Média'), 20)
+        self.assertEqual(level_for_name('Alta'), 30)
+        self.assertEqual(level_for_name('Urgente'), 40)
+        self.assertEqual(level_for_name('Crítica'), 40)
+
+    def test_matching_is_accent_and_case_insensitive(self):
+        from tickets.priority_levels import level_for_name
+
+        self.assertEqual(level_for_name('MEDIA'), 20)
+        self.assertEqual(level_for_name('  alta  '), 30)
+        self.assertEqual(level_for_name('URGENTE'), 40)
+        self.assertEqual(level_for_name('CRÍTICA'), 40)
+
+    def test_unknown_name_maps_to_zero(self):
+        from tickets.priority_levels import level_for_name
+
+        self.assertEqual(level_for_name('Prioridade Especial'), 0)
+        self.assertEqual(level_for_name(''), 0)
+        self.assertEqual(level_for_name(None), 0)
+
+    def test_backfill_migration_sets_known_and_leaves_unknown_at_zero(self):
+        # Roda a função de backfill (a mesma usada pela RunPython) sobre um
+        # queryset real, sem passar pelo executor de migrations do Django.
+        from tickets.priority_levels import level_for_name
+
+        baixa = TicketPriority.objects.create(name='Baixa', level=0)
+        alta = TicketPriority.objects.create(name='Alta', level=0)
+        estranha = TicketPriority.objects.create(name='Prioridade X', level=0)
+
+        for prio in [baixa, alta, estranha]:
+            level = level_for_name(prio.name)
+            if level:
+                prio.level = level
+                prio.save(update_fields=['level'])
+
+        baixa.refresh_from_db()
+        alta.refresh_from_db()
+        estranha.refresh_from_db()
+        self.assertEqual(baixa.level, 10)
+        self.assertEqual(alta.level, 30)
+        self.assertEqual(estranha.level, 0)

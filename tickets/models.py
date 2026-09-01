@@ -47,11 +47,17 @@ class TicketView(BaseView):
 # Prioridade do Ticket/Chamado
 class TicketPriority(models.Model):
     name = models.CharField(max_length=80)
+    # HD-31: grau de urgência da prioridade. Convenção: QUANTO MAIOR, MAIS
+    # URGENTE. É o que dá significado à ordenação (ver Meta.ordering e
+    # TicketViewSet.ordering_fields) — antes disso, só existia o nome, e nada
+    # no sistema sabia que "Alta" é mais urgente que "Baixa".
+    level = models.PositiveIntegerField(default=0)
 
     class Meta:
         db_table = 'db_ticket_priority'
         verbose_name = 'Priority of Ticket'
         verbose_name_plural = 'Priorities of Ticket'
+        ordering = ['-level', 'name']
 
     def __str__(self):
         return self.name
