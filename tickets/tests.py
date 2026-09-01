@@ -1995,3 +1995,172 @@ class TicketLogMessageFormatTests(APITestCase):
             auto_log.action,
             f'Situação: {self.status_open.name} → {status_in_progress.name} (automático)',
         )
+
+
+class TicketAttachmentLogTests(APITestCase):
+    """HD-31: anexo é o outro ponto cego da auditoria além de acompanhante —
+    adicionar/remover anexo tem que deixar rastro com o nome do arquivo."""
+
+    def setUp(self):
+        self.ttype = TicketType.objects.create(name='Problema')
+        self.prio = TicketPriority.objects.create(name='Alta')
+        self.status_open = TicketStatus.objects.create(name='Aberto', is_default=True)
+        self.ticket = Ticket.objects.create(
+            user_id=OWNER_ID, subject='T', type_of_ticket=self.ttype,
+            priority=self.prio, status=self.status_open,
+        )
+        self.client.force_authenticate(user=make_user())
+
+    @patch('tickets.views.upload_fileobj', return_value='tickets/attachments/xyz/foto-do-erro.png')
+    def test_adding_attachment_logs_the_file_name(self, _up):
+        url = reverse('ticket-add-attachment', args=[self.ticket.id])
+        upload = SimpleUploadedFile('foto-do-erro.png', b'\x89PNG fake', content_type='image/png')
+        resp = self.client.post(url, {'file': upload}, format='multipart')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(
+            TicketLog.objects.filter(
+                ticket=self.ticket, action='Anexo adicionado: foto-do-erro.png',
+            ).exists()
+        )
+
+    @patch('tickets.views.upload_fileobj', return_value='tickets/attachments/xyz/foto-do-erro.png')
+    def test_removing_attachment_logs_the_file_name(self, _up):
+        add_url = reverse('ticket-add-attachment', args=[self.ticket.id])
+        upload = SimpleUploadedFile('foto-do-erro.png', b'\x89PNG fake', content_type='image/png')
+        self.client.post(add_url, {'file': upload}, format='multipart')
+        attachment = TicketAttachment.objects.get(ticket=self.ticket)
+        remove_url = reverse('ticket-remove-attachment', args=[self.ticket.id, attachment.id])
+        resp = self.client.delete(remove_url)
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        # Nome capturado ANTES do delete — a linha do anexo já não existe mais.
+        self.assertTrue(
+            TicketLog.objects.filter(
+                ticket=self.ticket, action='Anexo removido: foto-do-erro.png',
+            ).exists()
+        )
+
+
+class TicketWatcherLogTests(APITestCase):
+    """HD-31: acompanhante é o ponto mais crítico da auditoria — é o único jeito
+    de dar acesso de leitura a um setor inteiro sem deixar rastro. Departamento
+    grava UM registro (o que a pessoa fez), não um por setor expandido; a
+    promoção de derivado a manual não é uma ação nova, não gera linha;
+    requester (criação) e mention (vínculo) também não geram linha própria."""
+
+    DEPT = 'dddddddd-dddd-dddd-dddd-dddddddddddd'
+    SEC_A = 'aaaaaaa1-0000-0000-0000-000000000001'
+    SEC_B = 'aaaaaaa1-0000-0000-0000-000000000002'
+
+    def setUp(self):
+        self.ttype = TicketType.objects.create(name='Problema')
+        self.prio = TicketPriority.objects.create(name='Alta')
+        self.status_open = TicketStatus.objects.create(name='Aberto', is_default=True)
+        self.ticket = Ticket.objects.create(
+            user_id=OWNER_ID, subject='T', type_of_ticket=self.ttype,
+            priority=self.prio, status=self.status_open,
+        )
+        self.client.force_authenticate(user=make_user())
+        self.url = reverse('ticket-watchers', args=[self.ticket.id])
+
+    @patch('tickets.views.notify_sector')
+    def test_adding_standalone_sector_logs_one_entry(self, _ns):
+        resp = self.client.post(
+            self.url, {'kind': 'sector', 'target_id': self.SEC_A, 'target_name': 'Elétrica'},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(
+            TicketLog.objects.filter(ticket=self.ticket).count(), 1,
+        )
+        self.assertTrue(
+            TicketLog.objects.filter(
+                ticket=self.ticket, action='Acompanhante incluído: Elétrica',
+            ).exists()
+        )
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.list_department_sectors')
+    def test_adding_department_logs_exactly_one_entry(self, mock_list, _ns):
+        mock_list.return_value = [
+            {'id': self.SEC_A, 'name': 'Elétrica'}, {'id': self.SEC_B, 'name': 'Mecânica'},
+        ]
+        resp = self.client.post(
+            self.url, {'kind': 'department', 'target_id': self.DEPT, 'target_name': 'Manutenção'},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        # UM registro para o departamento — não um por setor expandido (seriam 3).
+        self.assertEqual(TicketLog.objects.filter(ticket=self.ticket).count(), 1)
+        self.assertTrue(
+            TicketLog.objects.filter(
+                ticket=self.ticket,
+                action='Acompanhante incluído: Manutenção (departamento)',
+            ).exists()
+        )
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.list_department_sectors')
+    def test_removing_department_logs_one_entry(self, mock_list, _ns):
+        mock_list.return_value = [
+            {'id': self.SEC_A, 'name': 'Elétrica'}, {'id': self.SEC_B, 'name': 'Mecânica'},
+        ]
+        self.client.post(
+            self.url, {'kind': 'department', 'target_id': self.DEPT, 'target_name': 'Manutenção'},
+        )
+        TicketLog.objects.filter(ticket=self.ticket).delete()  # isola o log da remoção
+        dept_row = self.ticket.watchers.get(kind='department')
+        detail = reverse('ticket-watcher-detail', args=[self.ticket.id, dept_row.id])
+        resp = self.client.delete(detail)
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(TicketLog.objects.filter(ticket=self.ticket).count(), 1)
+        self.assertTrue(
+            TicketLog.objects.filter(
+                ticket=self.ticket,
+                action='Acompanhante removido: Manutenção (departamento)',
+            ).exists()
+        )
+
+    @patch('tickets.views.notify_sector')
+    def test_promoting_derived_sector_to_manual_logs_nothing(self, _ns):
+        TicketWatcher.objects.create(
+            ticket=self.ticket, kind='sector', target_id=self.SEC_A, target_name='Elétrica',
+            origin=TicketWatcher.ORIGIN_DEPARTMENT, source_ref=self.DEPT,
+        )
+        resp = self.client.post(self.url, {'kind': 'sector', 'target_id': self.SEC_A})
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        # O acesso já existia (era derivado); só a origem mudou — sem linha nova.
+        self.assertFalse(TicketLog.objects.filter(ticket=self.ticket).exists())
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_creating_ticket_does_not_log_requester_sector_watcher(self, _n, _ns):
+        requester = make_user_with_sector(OWNER_ID, self.SEC_A, sector_name='TI')
+        self.client.force_authenticate(user=requester)
+        resp = self.client.post(reverse('ticket-list'), {
+            'subject': 'Novo', 'type_of_ticket': self.ttype.id, 'priority': self.prio.id,
+            'status': self.status_open.id, 'sector': self.SEC_B, 'sector_name': 'Manutenção',
+        })
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        created = Ticket.objects.get(subject='Novo')
+        self.assertTrue(created.watchers.filter(origin=TicketWatcher.ORIGIN_REQUESTER).exists())
+        # Só o log de criação do chamado — nenhum de acompanhante.
+        actions = list(TicketLog.objects.filter(ticket=created).values_list('action', flat=True))
+        self.assertEqual(actions, ['Chamado criado'])
+
+    @patch('tickets.serializer.notify_sector')
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_linking_mention_does_not_log_watcher(self, _n, _ns, _sns):
+        mentioned = Ticket.objects.create(
+            user_id=OWNER_ID, subject='Origem', type_of_ticket=self.ttype,
+            priority=self.prio, status=self.status_open,
+            sector_id=self.SEC_A, sector_name='Elétrica',
+        )
+        resp = self.client.post(reverse('ticket-list'), {
+            'subject': 'Novo', 'type_of_ticket': self.ttype.id, 'priority': self.prio.id,
+            'status': self.status_open.id, 'sector': self.SEC_B, 'sector_name': 'Manutenção',
+            'mentions': [mentioned.id],
+        })
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        created = Ticket.objects.get(subject='Novo')
+        self.assertTrue(created.watchers.filter(origin=TicketWatcher.ORIGIN_MENTION).exists())
+        actions = list(TicketLog.objects.filter(ticket=created).values_list('action', flat=True))
+        self.assertEqual(actions, ['Chamado criado'])

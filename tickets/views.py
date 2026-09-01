@@ -683,6 +683,12 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
             key=upload_fileobj(f, 'tickets/attachments', getattr(f, 'content_type', None)),
             name=f.name,
         )
+        TicketLog.objects.create(
+            ticket=ticket,
+            user_id=request.user.id,
+            user_name=request.user.get_full_name(),
+            action=f'Anexo adicionado: {_log_display(attachment.name)}',
+        )
         return Response(
             TicketAttachmentSerializer(attachment).data,
             status=http_status.HTTP_201_CREATED,
@@ -693,7 +699,16 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
         """Remove um anexo do chamado (dono ou admin)."""
         ticket = self.get_object()
         self._assert_can_edit(ticket)
-        TicketAttachment.objects.filter(ticket=ticket, pk=attachment_id).delete()
+        attachment = get_object_or_404(TicketAttachment, ticket=ticket, pk=attachment_id)
+        # HD-31: captura o nome ANTES do delete — depois disso não há mais como lê-lo.
+        attachment_name = attachment.name
+        attachment.delete()
+        TicketLog.objects.create(
+            ticket=ticket,
+            user_id=request.user.id,
+            user_name=request.user.get_full_name(),
+            action=f'Anexo removido: {_log_display(attachment_name)}',
+        )
         return Response(status=http_status.HTTP_204_NO_CONTENT)
 
 
@@ -737,10 +752,22 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
         # de inclusão, para um re-POST idempotente não renotificar acompanhantes já existentes.
         new_sector_ids = []
         if kind == TicketWatcher.KIND_SECTOR:
-            _, created = self._upsert_sector_watcher(ticket, target_uuid, request.data.get('target_name', ''),
-                                        TicketWatcher.ORIGIN_MANUAL, '')
+            watcher, created = self._upsert_sector_watcher(
+                ticket, target_uuid, request.data.get('target_name', ''),
+                TicketWatcher.ORIGIN_MANUAL, '',
+            )
             if created:
                 new_sector_ids.append(target_uuid)
+                # HD-31: só setor avulso NOVO gera registro — promover um setor
+                # derivado (origin=department) a manual não muda o acesso, só a
+                # origem, então `created` é False e nada é gravado (ver
+                # _upsert_sector_watcher).
+                TicketLog.objects.create(
+                    ticket=ticket,
+                    user_id=request.user.id,
+                    user_name=request.user.get_full_name(),
+                    action=f'Acompanhante incluído: {_log_display(watcher.target_name)}',
+                )
         else:
             # None = não deu para consultar; [] = departamento sem setor ativo.
             # Tratar os dois como vazio gravaria zero acompanhantes com resposta
@@ -771,11 +798,22 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
                 # Como já normalizamos manualmente acima (target_uuid), usamos ele
                 # direto — não dept_row.target_id — e o resultado é canônico nos
                 # dois casos (linha nova ou já existente).
-                dept_row, _ = TicketWatcher.objects.get_or_create(
+                dept_row, dept_created = TicketWatcher.objects.get_or_create(
                     ticket=ticket, kind=TicketWatcher.KIND_DEPARTMENT, target_id=target_uuid,
                     defaults={'target_name': request.data.get('target_name', ''),
                               'origin': TicketWatcher.ORIGIN_MANUAL},
                 )
+                # HD-31: UM registro por departamento incluído — a pessoa incluiu
+                # "a Manutenção", não N setores; a linha vive FORA do laço de
+                # expansão de propósito (dentro dele viraria um registro por
+                # setor do departamento, que é mecânica interna, não a ação).
+                if dept_created:
+                    TicketLog.objects.create(
+                        ticket=ticket,
+                        user_id=request.user.id,
+                        user_name=request.user.get_full_name(),
+                        action=f'Acompanhante incluído: {_log_display(dept_row.target_name)} (departamento)',
+                    )
                 dept_source_ref = str(target_uuid)
                 for sector in sectors:
                     # Id vindo do auth-server: serviço externo, não confiável o bastante
@@ -812,12 +850,25 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
         self.check_object_permissions(request, ticket)
         self._assert_can_handle(ticket)  # HD-31: mesma regra do add_watcher
         watcher = get_object_or_404(TicketWatcher, ticket=ticket, pk=watcher_id)
-        if watcher.kind == TicketWatcher.KIND_DEPARTMENT:
+        # HD-31: captura ANTES do delete — mesmo cuidado do remove_attachment.
+        watcher_name = watcher.target_name
+        is_department = watcher.kind == TicketWatcher.KIND_DEPARTMENT
+        if is_department:
             TicketWatcher.objects.filter(
                 ticket=ticket, kind=TicketWatcher.KIND_SECTOR,
                 origin=TicketWatcher.ORIGIN_DEPARTMENT, source_ref=str(watcher.target_id),
             ).delete()
         watcher.delete()
+        # UM registro para o departamento removido, não um por setor derivado
+        # excluído junto (mesma lógica do add_watcher — reflete a ação da
+        # pessoa, não a mecânica interna da expansão/limpeza).
+        suffix = ' (departamento)' if is_department else ''
+        TicketLog.objects.create(
+            ticket=ticket,
+            user_id=request.user.id,
+            user_name=request.user.get_full_name(),
+            action=f'Acompanhante removido: {_log_display(watcher_name)}{suffix}',
+        )
         return Response(status=http_status.HTTP_204_NO_CONTENT)
 
 
