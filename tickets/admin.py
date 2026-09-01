@@ -53,8 +53,8 @@ class TicketTypeAdmin(admin.ModelAdmin):
 
 @admin.register(TicketPriority)
 class TicketPriorityAdmin(admin.ModelAdmin):
-    list_display = ('name', 'level')
-    list_editable = ('level',)
+    list_display = ('name', 'level', 'highlight')
+    list_editable = ('level', 'highlight')
     search_fields = ('name',)
 
 

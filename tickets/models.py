@@ -52,6 +52,11 @@ class TicketPriority(models.Model):
     # TicketViewSet.ordering_fields) — antes disso, só existia o nome, e nada
     # no sistema sabia que "Alta" é mais urgente que "Baixa".
     level = models.PositiveIntegerField(default=0)
+    # HD-31: marca a prioridade para receber destaque visual na listagem de
+    # chamados (barra lateral + nome em negrito). Decisão de CADASTRO, não
+    # regra de negócio: nada impede marcar uma só ou várias (ex.: Urgente e
+    # Alta) — quem decide é quem mantém o cadastro de prioridades.
+    highlight = models.BooleanField(default=False)
 
     class Meta:
         db_table = 'db_ticket_priority'

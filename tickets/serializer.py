@@ -54,8 +54,9 @@ class TicketTypeSerializer(serializers.ModelSerializer):
 class TicketPrioritySerializer(serializers.ModelSerializer):
     class Meta:
         model = TicketPriority
-        # HD-31: level é gravável — a tela de cadastro de prioridades edita o grau.
-        fields = ["id", "name", "level"]
+        # HD-31: level é gravável — a tela de cadastro de prioridades edita o
+        # grau. `highlight` idem — marca destaque na listagem de chamados.
+        fields = ["id", "name", "level", "highlight"]
 
 
 class TicketStatusSerializer(serializers.ModelSerializer):

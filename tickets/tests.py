@@ -2232,6 +2232,29 @@ class TicketPriorityLevelTests(APITestCase):
         self.assertEqual(resp.data['level'], 15)
         self.assertEqual(TicketPriority.objects.get(name='Nova').level, 15)
 
+    def test_priority_serializer_reads_and_writes_highlight_default_false(self):
+        """HD-31: `highlight` marca destaque na listagem de chamados — sem
+        validação de quantidade (decisão de cadastro, não regra de negócio)."""
+        prio = TicketPriority.objects.create(name='Alta', level=30)
+        resp = self.client.get(reverse('ticket-priority-detail', args=[prio.id]))
+        self.assertEqual(resp.data['highlight'], False)
+
+        resp = self.client.patch(
+            reverse('ticket-priority-detail', args=[prio.id]), {'highlight': True}
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['highlight'], True)
+        prio.refresh_from_db()
+        self.assertTrue(prio.highlight)
+
+        resp = self.client.post(
+            reverse('ticket-priority-list'),
+            {'name': 'Urgente', 'level': 40, 'highlight': True},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data['highlight'], True)
+        self.assertTrue(TicketPriority.objects.get(name='Urgente').highlight)
+
 
 class TicketPriorityBackfillMigrationTests(APITestCase):
     """HD-31: função de mapeamento de nome -> level usada pela migration de
