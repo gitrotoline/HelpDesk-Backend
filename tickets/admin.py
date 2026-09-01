@@ -42,7 +42,7 @@ class TicketAdmin(admin.ModelAdmin):
 
 @admin.register(TicketStatus)
 class TicketStatusAdmin(admin.ModelAdmin):
-    list_display = ('name', 'is_default', 'is_final')
+    list_display = ('name', 'is_default', 'is_final', 'is_in_progress')
 
 
 @admin.register(TicketType)

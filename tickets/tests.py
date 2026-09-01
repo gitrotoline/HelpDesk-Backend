@@ -1382,3 +1382,126 @@ class CloseReopenStatusChoiceTests(APITestCase):
                 ticket=self.ticket, action='Ticket reaberto como Aberto'
             ).exists()
         )
+
+
+class TicketStatusInProgressValidationTests(APITestCase):
+    """HD-31: no máximo UMA situação pode ter is_in_progress=True — validado no
+    serializer, porque a transição automática não tem a quem perguntar quando
+    há empate (diferente do fechar/reabrir, onde o usuário escolhe)."""
+
+    def setUp(self):
+        self.client.force_authenticate(
+            user=make_user(permissions=['user.tier_admin'])
+        )
+        self.list_url = reverse('ticket-status-list')
+
+    def test_first_in_progress_status_is_accepted(self):
+        resp = self.client.post(self.list_url, {'name': 'Em atendimento', 'is_in_progress': True})
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    def test_second_in_progress_status_is_rejected(self):
+        TicketStatus.objects.create(name='Em atendimento', is_in_progress=True)
+        resp = self.client.post(self.list_url, {'name': 'Outra', 'is_in_progress': True})
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('Em atendimento', str(resp.data))
+        self.assertEqual(TicketStatus.objects.filter(is_in_progress=True).count(), 1)
+
+    def test_updating_the_same_status_does_not_conflict_with_itself(self):
+        existing = TicketStatus.objects.create(name='Em atendimento', is_in_progress=True)
+        detail_url = reverse('ticket-status-detail', args=[existing.id])
+        resp = self.client.patch(detail_url, {'is_in_progress': True})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+
+class AutoStartProgressOnCommentTests(APITestCase):
+    """HD-31: o chamado entra em atendimento sozinho quando quem atende (membro
+    do setor responsável) comenta — sem que ninguém troque a situação à mão."""
+
+    SECTOR = 'aaaaaaa1-0000-0000-0000-000000000001'
+    OUTRO_SETOR = 'aaaaaaa1-0000-0000-0000-000000000002'
+
+    def setUp(self):
+        self.ttype = TicketType.objects.create(name='Problema')
+        self.prio = TicketPriority.objects.create(name='Alta')
+        self.status_open = TicketStatus.objects.create(name='Aberto', is_default=True)
+        self.status_wait = TicketStatus.objects.create(name='Aguardando peça')
+        self.status_in_progress = TicketStatus.objects.create(
+            name='Em atendimento', is_in_progress=True
+        )
+        with patch('tickets.views.notify_sector'), patch('tickets.views.notify'):
+            self.ticket = Ticket.objects.create(
+                user_id=OWNER_ID, subject='T', type_of_ticket=self.ttype,
+                priority=self.prio, status=self.status_open, sector_id=self.SECTOR,
+                sector_name='Elétrica',
+            )
+        self.sector_member = make_user_with_sector(OTHER_ID, self.SECTOR, sector_name='Elétrica')
+        self.list_url = reverse('ticket-comment-list')
+
+    def _comment(self, user, body='oi'):
+        self.client.force_authenticate(user=user)
+        return self.client.post(self.list_url, {'ticket': self.ticket.id, 'body': body})
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_sector_member_comment_moves_ticket_to_in_progress(self, _n, _ns):
+        resp = self._comment(self.sector_member)
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.ticket.refresh_from_db()
+        self.assertEqual(self.ticket.status_id, self.status_in_progress.id)
+        self.assertTrue(
+            TicketLog.objects.filter(
+                ticket=self.ticket, action='Ticket em atendimento (automático)'
+            ).exists()
+        )
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_requester_comment_does_not_move_ticket(self, _n, _ns):
+        # OWNER_ID é o dono/solicitante — não é membro do setor responsável.
+        resp = self._comment(make_user(user_id=OWNER_ID))
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.ticket.refresh_from_db()
+        self.assertEqual(self.ticket.status_id, self.status_open.id)
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_ticket_outside_default_status_does_not_move(self, _n, _ns):
+        # "Aguardando peça" foi uma escolha deliberada — comentar não pode atropelá-la.
+        self.ticket.status = self.status_wait
+        self.ticket.save(update_fields=['status'])
+        resp = self._comment(self.sector_member)
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.ticket.refresh_from_db()
+        self.assertEqual(self.ticket.status_id, self.status_wait.id)
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_no_in_progress_status_registered_does_not_move_and_comment_still_saves(self, _n, _ns):
+        self.status_in_progress.delete()
+        resp = self._comment(self.sector_member)
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.ticket.refresh_from_db()
+        self.assertEqual(self.ticket.status_id, self.status_open.id)
+        self.assertTrue(TicketComment.objects.filter(ticket=self.ticket).exists())
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_outsider_comment_does_not_move_ticket(self, _n, _ns):
+        outsider = make_user_with_sector(
+            '33333333-3333-3333-3333-333333333333', self.OUTRO_SETOR, sector_name='Mecânica'
+        )
+        TicketRecipient.objects.create(ticket=self.ticket, user_id=outsider.id)
+        resp = self._comment(outsider)
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.ticket.refresh_from_db()
+        self.assertEqual(self.ticket.status_id, self.status_open.id)
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_does_not_send_a_second_notification_for_the_transition(self, mock_notify, mock_notify_sector):
+        resp = self._comment(self.sector_member)
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        # Só as chamadas de "nova resposta" (notify + notify_sector) do próprio
+        # comentário — nenhuma chamada extra para a transição automática.
+        self.assertEqual(mock_notify.call_count, 1)
+        self.assertEqual(mock_notify_sector.call_count, 1)

@@ -715,6 +715,49 @@ class TicketCommentViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
             raise PermissionDenied('Você só pode excluir os próprios comentários.')
 
 
+    def _maybe_start_progress(self, ticket):
+        """HD-31: ao comentar, move o chamado para a situação de início de
+        atendimento — automático, sem notificação própria (o comentário já
+        dispara "Nova resposta no ticket #N" para o solicitante; um segundo
+        aviso para o mesmo acontecimento seria ruído).
+
+        Só troca se TODAS as condições valerem; qualquer uma falhando, não
+        muda nada e o comentário segue salvo normalmente (comentar não pode
+        falhar por causa disto):
+        1. existe exatamente UMA situação com is_in_progress=True (a
+           validação do serializer garante no máximo uma; aqui também
+           cobrimos o caso de zero);
+        2. o chamado está numa situação com is_default=True — nunca atropela
+           uma situação escolhida deliberadamente (ex.: "Aguardando peça");
+        3. o autor do comentário é membro do setor responsável do chamado —
+           o solicitante comentando não pode marcar como em atendimento.
+        """
+        in_progress_candidates = list(TicketStatus.objects.filter(is_in_progress=True)[:2])
+        if len(in_progress_candidates) != 1:
+            return
+        if not ticket.status.is_default:
+            return
+        user = self.request.user
+        # Mesma armadilha de tipos do _assert_can_handle (TicketViewSet):
+        # user.sector.id vem do JSON do auth-server (string) e ticket.sector_id
+        # é uuid.UUID (banco) — compara com str() dos dois lados.
+        in_sector = bool(
+            user.sector and user.sector.id
+            and str(user.sector.id) == str(ticket.sector_id)
+        )
+        if not in_sector:
+            return
+        in_progress_status = in_progress_candidates[0]
+        ticket.status = in_progress_status
+        ticket.save(update_fields=['status', 'updated_at'])
+        TicketLog.objects.create(
+            ticket=ticket,
+            user_id=user.id,
+            user_name=user.get_full_name(),
+            action='Ticket em atendimento (automático)',
+        )
+
+
     def perform_create(self, serializer):
         # Chamado fechado não recebe resposta nova: para responder, reabra
         # (POST /tickets/{id}/reopen/). Checado ANTES do save — o front esconde
@@ -745,6 +788,7 @@ class TicketCommentViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
             user_name=self.request.user.get_full_name(),
             action='Comentário adicionado',
         )
+        self._maybe_start_progress(ticket)
         message = f'Nova resposta no ticket #{ticket.pk}'
         # Dono + quem está em cópia, menos o próprio autor.
         recipients = [ticket.user_id, *ticket.recipients.values_list('user_id', flat=True)]

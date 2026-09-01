@@ -59,7 +59,25 @@ class TicketPrioritySerializer(serializers.ModelSerializer):
 class TicketStatusSerializer(serializers.ModelSerializer):
     class Meta:
         model = TicketStatus
-        fields = ["id", "name", "is_default", "is_final"]
+        fields = ["id", "name", "is_default", "is_final", "is_in_progress"]
+
+    def validate_is_in_progress(self, value):
+        # HD-31: no máximo UMA situação pode ser "início de atendimento" — a
+        # transição automática (TicketCommentViewSet.perform_create) escolhe
+        # sozinha, sem ninguém para desempatar, diferente do fechar/reabrir
+        # (onde o usuário escolhe quando há mais de uma situação candidata).
+        if not value:
+            return value
+        qs = TicketStatus.objects.filter(is_in_progress=True)
+        if self.instance is not None:
+            qs = qs.exclude(pk=self.instance.pk)
+        existing = qs.first()
+        if existing is not None:
+            raise serializers.ValidationError(
+                f'A situação "{existing.name}" já é a situação de início de atendimento; '
+                'só pode haver uma.'
+            )
+        return value
 
 
 class TicketSerializer(serializers.ModelSerializer):

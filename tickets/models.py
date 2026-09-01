@@ -130,6 +130,11 @@ class TicketStatus(models.Model):
     name = models.CharField(max_length=80)
     is_default = models.BooleanField(default=False) # is_default é o status de um chamado (re)aberto;
     is_final = models.BooleanField(default=False) # close/reopen:  is_final é o status que encerra o chamado.
+    # HD-31: situação de início de atendimento — no máximo UMA (validado no
+    # serializer, ver TicketStatusSerializer). A transição automática (ver
+    # TicketCommentViewSet.perform_create) move o chamado para cá quando alguém
+    # do setor responsável comenta e o chamado ainda está na situação padrão.
+    is_in_progress = models.BooleanField(default=False)
 
     class Meta:
         db_table = 'db_ticket_status'
