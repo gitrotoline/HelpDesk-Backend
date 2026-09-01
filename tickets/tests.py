@@ -1505,3 +1505,178 @@ class AutoStartProgressOnCommentTests(APITestCase):
         # comentário — nenhuma chamada extra para a transição automática.
         self.assertEqual(mock_notify.call_count, 1)
         self.assertEqual(mock_notify_sector.call_count, 1)
+
+
+class TicketCreateOptionalStatusTests(APITestCase):
+    """HD-31: `status` passa a ser opcional na criação. Omitido, usa a situação
+    is_default (única) — 0 ou 2+ candidatas é 400, sem sorteio (mesmo
+    princípio do close/reopen). Informado, continua sendo respeitado tal e
+    qual, e a edição não muda (omitir `status` no PATCH não mexe nele)."""
+
+    def setUp(self):
+        self.ttype = TicketType.objects.create(name='Problema')
+        self.prio = TicketPriority.objects.create(name='Alta')
+        self.client.force_authenticate(user=make_user())
+        self.list_url = reverse('ticket-list')
+
+    def _payload(self, **extra):
+        data = {
+            'subject': 'Sem status',
+            'type_of_ticket': self.ttype.id,
+            'priority': self.prio.id,
+            'sector': '33333333-3333-3333-3333-333333333333',
+            'sector_name': 'TI',
+        }
+        data.update(extra)
+        return data
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_create_without_status_uses_single_default(self, _n, _ns):
+        default = TicketStatus.objects.create(name='Aberto', is_default=True)
+        resp = self.client.post(self.list_url, self._payload())
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        ticket = Ticket.objects.get(subject='Sem status')
+        self.assertEqual(ticket.status_id, default.id)
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_create_without_status_and_two_defaults_is_rejected(self, _n, _ns):
+        TicketStatus.objects.create(name='Aberto', is_default=True)
+        TicketStatus.objects.create(name='Novo', is_default=True)
+        resp = self.client.post(self.list_url, self._payload())
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Ticket.objects.filter(subject='Sem status').exists())
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_create_without_status_and_no_default_is_rejected(self, _n, _ns):
+        TicketStatus.objects.create(name='Aberto', is_default=False)
+        resp = self.client.post(self.list_url, self._payload())
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Ticket.objects.filter(subject='Sem status').exists())
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_create_with_explicit_status_is_respected(self, _n, _ns):
+        default = TicketStatus.objects.create(name='Aberto', is_default=True)
+        chosen = TicketStatus.objects.create(name='Aguardando peça')
+        resp = self.client.post(self.list_url, self._payload(status=chosen.id))
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        ticket = Ticket.objects.get(subject='Sem status')
+        self.assertEqual(ticket.status_id, chosen.id)
+        self.assertNotEqual(ticket.status_id, default.id)
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_editing_status_still_works_without_default_ambiguity_interference(self, _n, _ns):
+        # Duas situações padrão cadastradas (ambíguo para criar) não deve
+        # impedir a EDIÇÃO de status de um chamado já existente.
+        default = TicketStatus.objects.create(name='Aberto', is_default=True)
+        with patch('tickets.views.notify_sector'), patch('tickets.views.notify'):
+            ticket = Ticket.objects.create(
+                user_id=OWNER_ID, subject='Existente', type_of_ticket=self.ttype,
+                priority=self.prio, status=default,
+            )
+        TicketStatus.objects.create(name='Outra padrão', is_default=True)
+        new_status = TicketStatus.objects.create(name='Aguardando peça')
+        detail_url = reverse('ticket-detail', args=[ticket.id])
+        resp = self.client.patch(detail_url, {'status': new_status.id})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ticket.refresh_from_db()
+        self.assertEqual(ticket.status_id, new_status.id)
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_editing_ticket_without_status_in_body_does_not_touch_status(self, _n, _ns):
+        default = TicketStatus.objects.create(name='Aberto', is_default=True)
+        with patch('tickets.views.notify_sector'), patch('tickets.views.notify'):
+            ticket = Ticket.objects.create(
+                user_id=OWNER_ID, subject='Existente', type_of_ticket=self.ttype,
+                priority=self.prio, status=default,
+            )
+        detail_url = reverse('ticket-detail', args=[ticket.id])
+        resp = self.client.patch(detail_url, {'subject': 'Existente editado'})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ticket.refresh_from_db()
+        self.assertEqual(ticket.status_id, default.id)
+        self.assertEqual(ticket.subject, 'Existente editado')
+
+
+class ReopenWithCommentsGoesToInProgressTests(APITestCase):
+    """HD-31: um chamado que já tem comentários não é "novo" — reabrir sem
+    `status` no corpo volta para a situação is_in_progress (não a padrão),
+    desde que exista exatamente uma. `status` explícito sempre ganha; sem
+    comentários ou sem situação de atendimento cadastrada, cai no
+    comportamento de sempre (situação padrão)."""
+
+    def setUp(self):
+        self.ttype = TicketType.objects.create(name='Problema')
+        self.prio = TicketPriority.objects.create(name='Alta')
+        self.status_default = TicketStatus.objects.create(name='Aberto', is_default=True)
+        self.status_final = TicketStatus.objects.create(name='Fechado', is_final=True)
+        self.status_in_progress = TicketStatus.objects.create(
+            name='Em atendimento', is_in_progress=True
+        )
+        self.client.force_authenticate(user=make_user())
+
+    def _make_closed_ticket(self, with_comment):
+        with patch('tickets.views.notify_sector'), patch('tickets.views.notify'):
+            ticket = Ticket.objects.create(
+                user_id=OWNER_ID, subject='T', type_of_ticket=self.ttype,
+                priority=self.prio, status=self.status_final, closed_at=timezone.now(),
+            )
+            if with_comment:
+                TicketComment.objects.create(
+                    ticket=ticket, user_id=OTHER_ID, user_name='Outro', body='oi'
+                )
+        return ticket
+
+    def _reopen(self, ticket, status_id=None):
+        data = {'status': status_id} if status_id is not None else {}
+        return self.client.post(reverse('ticket-reopen', args=[ticket.id]), data)
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_reopen_with_comments_goes_to_in_progress(self, _n, _ns):
+        ticket = self._make_closed_ticket(with_comment=True)
+        resp = self._reopen(ticket)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ticket.refresh_from_db()
+        self.assertIsNone(ticket.closed_at)
+        self.assertEqual(ticket.status_id, self.status_in_progress.id)
+        self.assertTrue(
+            TicketLog.objects.filter(
+                ticket=ticket, action='Ticket reaberto como Em atendimento'
+            ).exists()
+        )
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_reopen_without_comments_goes_to_default(self, _n, _ns):
+        ticket = self._make_closed_ticket(with_comment=False)
+        resp = self._reopen(ticket)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ticket.refresh_from_db()
+        self.assertEqual(ticket.status_id, self.status_default.id)
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_reopen_with_explicit_status_is_respected_even_with_comments(self, _n, _ns):
+        # Escolha explícita do usuário sempre ganha, mesmo tendo comentários e
+        # existindo situação is_in_progress.
+        ticket = self._make_closed_ticket(with_comment=True)
+        resp = self._reopen(ticket, status_id=self.status_default.id)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ticket.refresh_from_db()
+        self.assertEqual(ticket.status_id, self.status_default.id)
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_reopen_with_comments_but_no_in_progress_status_falls_back_to_default(self, _n, _ns):
+        self.status_in_progress.delete()
+        ticket = self._make_closed_ticket(with_comment=True)
+        resp = self._reopen(ticket)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ticket.refresh_from_db()
+        self.assertEqual(ticket.status_id, self.status_default.id)

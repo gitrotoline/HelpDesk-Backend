@@ -85,6 +85,11 @@ class TicketSerializer(serializers.ModelSerializer):
     # Setor é obrigatório na criação. Em PATCH (partial), o DRF não força o
     # required; mas se vier, `allow_null=False` impede limpar o setor.
     sector = serializers.UUIDField(write_only=True, required=True, allow_null=False)
+    # HD-31: status passa a ser OPCIONAL na criação — omitido, usa a situação
+    # is_default (validate() abaixo resolve/erra). Informado explicitamente,
+    # continua sendo respeitado tal e qual (e a edição não muda: `validate`
+    # só mexe quando `self.instance is None`, ou seja, só no create).
+    status = serializers.PrimaryKeyRelatedField(queryset=TicketStatus.objects.all(), required=False)
     # HD-31: opção de quem abre o chamado. Padrão True preserva o comportamento
     # atual (setor do solicitante vira acompanhante automático). Não é persistido
     # no modelo — só chega até a view (perform_create) para decidir se chama
@@ -107,6 +112,25 @@ class TicketSerializer(serializers.ModelSerializer):
         model = Ticket
         fields = "__all__"
         read_only_fields = ["user_id", "user_name", "sector_id", "created_at", "updated_at", "closed_at"]
+
+    def validate(self, attrs):
+        # HD-31: status opcional na criação — mesmo princípio do close/reopen
+        # (TicketViewSet._resolve_status_choice): nunca escolher em silêncio.
+        # Só se aplica ao create (self.instance is None); em update, omitir
+        # `status` continua significando "não mexe nele" (comportamento do
+        # ModelSerializer.update, que só toca campos presentes em attrs).
+        if self.instance is None and 'status' not in attrs:
+            candidates = list(TicketStatus.objects.filter(is_default=True)[:2])
+            if len(candidates) == 0:
+                raise serializers.ValidationError(
+                    {'status': 'Nenhuma situação cadastrada como padrão; informe a situação do chamado.'}
+                )
+            if len(candidates) > 1:
+                raise serializers.ValidationError(
+                    {'status': 'Existe mais de uma situação padrão; informe qual usar.'}
+                )
+            attrs['status'] = candidates[0]
+        return attrs
 
     def _sync_recipients(self, ticket, recipients):
         # Substitui a lista de cópia: limpa e recria. Idempotente.

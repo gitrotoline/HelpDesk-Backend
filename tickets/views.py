@@ -468,21 +468,35 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
                 {'detail': 'Ticket não está fechado.'},
                 status=http_status.HTTP_400_BAD_REQUEST,
             )
-        default_status, error = self._resolve_status_choice(
-            request, search_flag='is_default', is_valid=lambda s: not s.is_final,
+        # HD-31: um chamado que já tem comentários não é "novo" — reabrir volta
+        # para a situação de início de atendimento (is_in_progress), não para a
+        # padrão. Precedência (nesta ordem):
+        # 1. `status` informado no corpo sempre ganha — escolha explícita do
+        #    usuário no diálogo (checado dentro de _resolve_status_choice).
+        # 2. sem `status`, com comentários e exatamente UMA situação
+        #    is_in_progress=True → usa ela.
+        # 3. caso contrário → comportamento de sempre (situação padrão única;
+        #    ambiguidade ou ausência → 400, sem sorteio).
+        search_flag = 'is_default'
+        if request.data.get('status') in (None, '') and ticket.comments.exists():
+            in_progress_count = TicketStatus.objects.filter(is_in_progress=True).count()
+            if in_progress_count == 1:
+                search_flag = 'is_in_progress'
+        new_status, error = self._resolve_status_choice(
+            request, search_flag=search_flag, is_valid=lambda s: not s.is_final,
             invalid_detail='Situação informada não pode ser usada para reabrir (é uma situação de encerramento).',
             verb='reabrir',
         )
         if error is not None:
             return error
-        ticket.status = default_status
+        ticket.status = new_status
         ticket.closed_at = None
         ticket.save(update_fields=['status', 'closed_at', 'updated_at'])
         TicketLog.objects.create(
             ticket=ticket,
             user_id=request.user.id,
             user_name=request.user.get_full_name(),
-            action=f'Ticket reaberto como {default_status.name}',
+            action=f'Ticket reaberto como {new_status.name}',
         )
         notify([ticket.user_id], 'ticket', ticket.pk, f'Ticket #{ticket.pk} foi reaberto', request.user)
         self._notify_watchers(ticket, f'Ticket #{ticket.pk} foi reaberto')
