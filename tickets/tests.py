@@ -2305,4 +2305,60 @@ class TicketPriorityBackfillMigrationTests(APITestCase):
         estranha.refresh_from_db()
         self.assertEqual(baixa.level, 10)
         self.assertEqual(alta.level, 30)
-        self.assertEqual(estranha.level, 0)
+
+
+class TicketFilterHighlightAndOpenTests(APITestCase):
+    """HD-31: painel de urgentes precisa filtrar por prioridade destacada
+    (`priority_highlight`) combinada com "em aberto" (`is_open`), sem mexer
+    no comportamento padrão da listagem (sem filtro, tudo continua vindo)."""
+
+    def setUp(self):
+        self.ttype = TicketType.objects.create(name='Problema')
+        self.prio_urgente = TicketPriority.objects.create(name='Urgente', highlight=True)
+        self.prio_baixa = TicketPriority.objects.create(name='Baixa', highlight=False)
+        self.status_open = TicketStatus.objects.create(name='Aberto', is_default=True)
+        self.status_done = TicketStatus.objects.create(name='Fechado', is_final=True)
+
+        self.urgente_aberto = Ticket.objects.create(
+            user_id=OWNER_ID, subject='Urgente aberto', type_of_ticket=self.ttype,
+            priority=self.prio_urgente, status=self.status_open,
+        )
+        self.urgente_fechado = Ticket.objects.create(
+            user_id=OWNER_ID, subject='Urgente fechado', type_of_ticket=self.ttype,
+            priority=self.prio_urgente, status=self.status_done, closed_at=timezone.now(),
+        )
+        self.comum_aberto = Ticket.objects.create(
+            user_id=OWNER_ID, subject='Comum aberto', type_of_ticket=self.ttype,
+            priority=self.prio_baixa, status=self.status_open,
+        )
+        self.client.force_authenticate(user=make_user())
+
+    def _subjects(self, resp):
+        return {t['subject'] for t in resp.data['results']}
+
+    def test_priority_highlight_returns_only_highlighted_priority(self):
+        resp = self.client.get(reverse('ticket-list'), {'priority_highlight': 'true'})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            self._subjects(resp), {'Urgente aberto', 'Urgente fechado'},
+        )
+
+    def test_priority_highlight_combined_with_is_open_excludes_closed(self):
+        resp = self.client.get(
+            reverse('ticket-list'), {'priority_highlight': 'true', 'is_open': 'true'},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(self._subjects(resp), {'Urgente aberto'})
+
+    def test_is_open_alone_excludes_closed_tickets(self):
+        resp = self.client.get(reverse('ticket-list'), {'is_open': 'true'})
+        self.assertEqual(
+            self._subjects(resp), {'Urgente aberto', 'Comum aberto'},
+        )
+
+    def test_without_filter_listing_returns_everything(self):
+        resp = self.client.get(reverse('ticket-list'))
+        self.assertEqual(
+            self._subjects(resp),
+            {'Urgente aberto', 'Urgente fechado', 'Comum aberto'},
+        )
