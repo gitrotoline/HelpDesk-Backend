@@ -1079,3 +1079,117 @@ class TicketDeleteNotificationsTests(APITestCase):
         self.assertTrue(
             TicketLog.objects.filter(action=f'Ticket #{self.ticket.id} excluído').exists()
         )
+
+
+class SectorHandlerPermissionsTests(APITestCase):
+    """HD-31: quem fecha o chamado (dono, membro do setor do ticket, ou admin)
+    passa a poder também reabrir e gerenciar acompanhantes — o mesmo conjunto,
+    via _assert_can_handle. Prova a mudança E o limite dela: o membro do setor
+    continua sem poder editar/excluir o chamado (isso é _assert_can_edit/
+    _assert_can_delete, dono ou admin, e não muda)."""
+
+    SECTOR = 'aaaaaaa1-0000-0000-0000-000000000001'
+    OUTRO_SETOR = 'aaaaaaa1-0000-0000-0000-000000000002'
+
+    def setUp(self):
+        self.ttype = TicketType.objects.create(name='Problema')
+        self.prio = TicketPriority.objects.create(name='Alta')
+        self.status_open = TicketStatus.objects.create(name='Aberto', is_default=True)
+        self.status_done = TicketStatus.objects.create(name='Fechado', is_final=True)
+        # sector_id preenchido dispara notify_sector no perform_create — mocka.
+        with patch('tickets.views.notify_sector'), patch('tickets.views.notify'):
+            self.ticket = Ticket.objects.create(
+                user_id=OWNER_ID, subject='T', type_of_ticket=self.ttype,
+                priority=self.prio, status=self.status_open, sector_id=self.SECTOR,
+                sector_name='Elétrica',
+            )
+        self.sector_member = make_user_with_sector(OTHER_ID, self.SECTOR, sector_name='Elétrica')
+        OUTSIDER_ID = '33333333-3333-3333-3333-333333333333'
+        self.outsider = make_user_with_sector(OUTSIDER_ID, self.OUTRO_SETOR, sector_name='Mecânica')
+        # Dá visibilidade ao outsider (em cópia) SEM dar direito de atender —
+        # sem isso, get_object() já barraria com 404 antes de qualquer checagem
+        # de permissão, e o teste não provaria nada sobre _assert_can_handle.
+        TicketRecipient.objects.create(ticket=self.ticket, user_id=OUTSIDER_ID)
+
+    # 0. Membro do setor do chamado consegue fechar — caso relatado em produção:
+    # a comparação `user.sector.id == ticket.sector_id` (string vs uuid.UUID)
+    # nunca batia sem normalizar os dois lados para str, então só dono/admin
+    # conseguiam fechar; nenhum teste existente exercitava o ramo do setor.
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_sector_member_can_close(self, _n, _ns):
+        self.client.force_authenticate(user=self.sector_member)
+        resp = self.client.post(reverse('ticket-close', args=[self.ticket.id]))
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.ticket.refresh_from_db()
+        self.assertIsNotNone(self.ticket.closed_at)
+
+    # 1. Membro do setor do chamado consegue reabrir (hoje recebe 403).
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_sector_member_can_reopen(self, _n, _ns):
+        self.ticket.closed_at = timezone.now()
+        self.ticket.status = self.status_done
+        self.ticket.save(update_fields=['closed_at', 'status'])
+
+        self.client.force_authenticate(user=self.sector_member)
+        resp = self.client.post(reverse('ticket-reopen', args=[self.ticket.id]))
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.ticket.refresh_from_db()
+        self.assertIsNone(self.ticket.closed_at)
+
+    # 2. Membro do setor consegue incluir e remover acompanhante.
+    @patch('tickets.views.notify_sector')
+    def test_sector_member_can_add_and_remove_watcher(self, _ns):
+        self.client.force_authenticate(user=self.sector_member)
+        watchers_url = reverse('ticket-watchers', args=[self.ticket.id])
+
+        resp = self.client.post(watchers_url, {'kind': 'sector', 'target_id': self.OUTRO_SETOR})
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        watcher = TicketWatcher.objects.get(ticket=self.ticket, target_id=self.OUTRO_SETOR)
+
+        detail_url = reverse('ticket-watcher-detail', args=[self.ticket.id, watcher.id])
+        resp = self.client.delete(detail_url)
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(TicketWatcher.objects.filter(pk=watcher.pk).exists())
+
+    # 3. Quem não é dono, nem do setor, nem admin recebe 403 nas três operações.
+    @patch('tickets.views.notify_sector')
+    def test_outsider_forbidden_on_close_reopen_and_watchers(self, _ns):
+        self.client.force_authenticate(user=self.outsider)
+
+        resp = self.client.post(reverse('ticket-close', args=[self.ticket.id]))
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+        self.ticket.closed_at = timezone.now()
+        self.ticket.status = self.status_done
+        self.ticket.save(update_fields=['closed_at', 'status'])
+        resp = self.client.post(reverse('ticket-reopen', args=[self.ticket.id]))
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+        watchers_url = reverse('ticket-watchers', args=[self.ticket.id])
+        resp = self.client.post(watchers_url, {'kind': 'sector', 'target_id': self.OUTRO_SETOR})
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+        watcher = TicketWatcher.objects.create(
+            ticket=self.ticket, kind=TicketWatcher.KIND_SECTOR,
+            target_id=self.OUTRO_SETOR, target_name='Mecânica',
+        )
+        detail_url = reverse('ticket-watcher-detail', args=[self.ticket.id, watcher.id])
+        resp = self.client.delete(detail_url)
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    # 4. Trava importante: membro do setor continua sem poder editar (PATCH) nem excluir.
+    def test_sector_member_still_cannot_edit_or_delete(self):
+        self.client.force_authenticate(user=self.sector_member)
+
+        resp = self.client.patch(
+            reverse('ticket-detail', args=[self.ticket.id]), {'subject': 'Outro assunto'}
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+        resp = self.client.delete(reverse('ticket-detail', args=[self.ticket.id]))
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(Ticket.objects.filter(pk=self.ticket.pk).exists())

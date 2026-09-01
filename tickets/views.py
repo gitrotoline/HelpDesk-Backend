@@ -168,12 +168,31 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
             raise PermissionDenied('Você só pode excluir os próprios tickets.')
 
 
-    def _assert_can_close(self, ticket):
-        # Fechar o ticket: dono, membros do setor do ticket, ou admin.
+    def _assert_can_handle(self, ticket):
+        """Quem participa do atendimento do ticket: dono, membros do setor do
+        ticket, ou admin.
+
+        HD-31: fechar, reabrir e gerenciar acompanhantes (add/remove watcher)
+        são todos parte de "atender" o chamado, então compartilham esta regra.
+        Antes só quem fechava (esta mesma checagem, então chamada
+        _assert_can_close) tinha essas outras ações restritas a _assert_can_edit
+        (dono/admin) — um beco sem saída onde o técnico do setor fechava o
+        chamado e depois não conseguia reabri-lo nem incluir outro setor em
+        cópia. Note que isso é diferente de _assert_can_edit/_assert_can_delete:
+        editar o CONTEÚDO do chamado (assunto, descrição) ou excluí-lo continua
+        sendo só do dono ou admin — atender não é reescrever o que a pessoa
+        pediu."""
         user = self.request.user
-        in_sector = bool(user.sector and user.sector.id and user.sector.id == ticket.sector_id)
+        # user.sector.id vem do JSON do auth-server (string); ticket.sector_id é
+        # uuid.UUID (UUIDField carregado do banco) — sem normalizar os dois lados
+        # para str, a comparação nunca bate (mesma armadilha do _assert_can_edit,
+        # que já normaliza ticket.user_id/user.id acima).
+        in_sector = bool(
+            user.sector and user.sector.id
+            and str(user.sector.id) == str(ticket.sector_id)
+        )
         if str(ticket.user_id) != str(user.id) and not in_sector and not user.has_perm('user.tier_admin'):
-            raise PermissionDenied('Você não pode fechar este ticket.')
+            raise PermissionDenied('Você não pode gerenciar este ticket.')
 
 
     def _notify_watchers(self, ticket, message, sector_ids=None):
@@ -360,7 +379,7 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def close(self, request, pk=None):
         ticket = self.get_object()
-        self._assert_can_close(ticket)
+        self._assert_can_handle(ticket)
         if ticket.closed_at is not None:
             return Response(
                 {'detail': 'Ticket já está fechado.'},
@@ -389,7 +408,7 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def reopen(self, request, pk=None):
         ticket = self.get_object()
-        self._assert_can_edit(ticket)  # reabrir: só dono ou admin
+        self._assert_can_handle(ticket)  # HD-31: reabrir é atender — dono, setor do ticket ou admin
         if ticket.closed_at is None:
             return Response(
                 {'detail': 'Ticket não está fechado.'},
@@ -489,13 +508,16 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
     def add_watcher(self, request, pk=None):
         """Inclui um setor — ou um departamento, que é expandido nos setores dele."""
         # Busca SEM o filtro de visibilidade do get_queryset (que é regra de LEITURA
-        # — dono, setor do ticket ou cópia): editar é mais restrito (_assert_can_edit,
-        # só dono/admin), então quem só vê o chamado tem que cair em 403, não 404.
+        # — dono, setor do ticket ou cópia): gerenciar acompanhantes é mais restrito
+        # (_assert_can_handle, ver abaixo), então quem só vê o chamado tem que cair
+        # em 403, não 404.
         ticket = get_object_or_404(Ticket, pk=pk)
         # MINOR 7: gancho de permissão de objeto — hoje as permission classes em uso não
         # implementam has_object_permission, mas se uma futura implementar, tem que valer aqui.
         self.check_object_permissions(request, ticket)
-        self._assert_can_edit(ticket)
+        # HD-31: gerenciar acompanhantes é atender — dono, setor do ticket ou admin
+        # (não mais restrito a dono/admin como o resto da edição do chamado).
+        self._assert_can_handle(ticket)
         kind = request.data.get('kind')
         target_id = request.data.get('target_id')
         if kind not in (TicketWatcher.KIND_SECTOR, TicketWatcher.KIND_DEPARTMENT) or not target_id:
@@ -593,7 +615,7 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
         ticket = get_object_or_404(Ticket, pk=pk)  # ver add_watcher: mesmo motivo
         # MINOR 7: mesmo gancho de permissão de objeto do add_watcher.
         self.check_object_permissions(request, ticket)
-        self._assert_can_edit(ticket)
+        self._assert_can_handle(ticket)  # HD-31: mesma regra do add_watcher
         watcher = get_object_or_404(TicketWatcher, ticket=ticket, pk=watcher_id)
         if watcher.kind == TicketWatcher.KIND_DEPARTMENT:
             TicketWatcher.objects.filter(

@@ -35,7 +35,11 @@ continua sendo o responsável.
   (ver "Congelamento" abaixo).
 - **Menção adiciona acompanhante automaticamente**: vincular o chamado 1 ao 2
   insere o setor do 1 como acompanhante do 2. Desvincular **não** remove.
-- **Quem gerencia**: dono ou admin, espelhando `_assert_can_edit`.
+- **Quem gerencia**: dono, membro do setor do chamado, ou admin — o mesmo
+  conjunto que pode fechar/reabrir o chamado, via `_assert_can_handle` (HD-31).
+  Gerenciar acompanhantes é atender o chamado, não editar seu conteúdo, então
+  não usa mais `_assert_can_edit` (que continua reservado a assunto/descrição
+  e exclusão, restrito a dono/admin).
 
 ## Princípio que resolve as sobreposições
 
