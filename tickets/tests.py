@@ -1680,3 +1680,116 @@ class ReopenWithCommentsGoesToInProgressTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         ticket.refresh_from_db()
         self.assertEqual(ticket.status_id, self.status_default.id)
+
+
+class ChangeStatusActionTests(APITestCase):
+    """HD-31: POST /tickets/{id}/status/ muda só a situação — quem atende
+    (dono, setor do ticket, ou admin) registra andamento (ex.: "Aguardando
+    vendas") sem precisar do direito de editar o chamado (_assert_can_edit)."""
+
+    SECTOR = 'aaaaaaa1-0000-0000-0000-000000000001'
+    OUTRO_SETOR = 'aaaaaaa1-0000-0000-0000-000000000002'
+    OUTSIDER_ID = '33333333-3333-3333-3333-333333333333'
+
+    def setUp(self):
+        self.ttype = TicketType.objects.create(name='Problema')
+        self.prio = TicketPriority.objects.create(name='Alta')
+        self.status_open = TicketStatus.objects.create(name='Aberto', is_default=True)
+        self.status_waiting = TicketStatus.objects.create(name='Aguardando vendas')
+        self.status_done = TicketStatus.objects.create(name='Fechado', is_final=True)
+        with patch('tickets.views.notify_sector'), patch('tickets.views.notify'):
+            self.ticket = Ticket.objects.create(
+                user_id=OWNER_ID, subject='T', type_of_ticket=self.ttype,
+                priority=self.prio, status=self.status_open, sector_id=self.SECTOR,
+                sector_name='Elétrica',
+            )
+        self.sector_member = make_user_with_sector(OTHER_ID, self.SECTOR, sector_name='Elétrica')
+        self.outsider = make_user_with_sector(self.OUTSIDER_ID, self.OUTRO_SETOR, sector_name='Mecânica')
+        # Visibilidade sem direito de atender (mesmo truque do SectorHandlerPermissionsTests):
+        # sem isto o get_object() barraria com 404 antes de checar permissão.
+        TicketRecipient.objects.create(ticket=self.ticket, user_id=self.OUTSIDER_ID)
+
+    def _change_status(self, status_id, ticket=None):
+        return self.client.post(
+            reverse('ticket-status', args=[(ticket or self.ticket).id]), {'status': status_id}
+        )
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_sector_member_changes_status_and_logs(self, _n, _ns):
+        self.client.force_authenticate(user=self.sector_member)
+        resp = self._change_status(self.status_waiting.id)
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.ticket.refresh_from_db()
+        self.assertEqual(self.ticket.status_id, self.status_waiting.id)
+        self.assertIsNone(self.ticket.closed_at)
+        log = TicketLog.objects.filter(ticket=self.ticket).latest('id')
+        self.assertEqual(log.action, f'Situação alterada para {self.status_waiting.name}')
+        self.assertEqual(str(log.user_id), OTHER_ID)
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_outsider_forbidden(self, _n, _ns):
+        self.client.force_authenticate(user=self.outsider)
+        resp = self._change_status(self.status_waiting.id)
+
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.ticket.refresh_from_db()
+        self.assertEqual(self.ticket.status_id, self.status_open.id)
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_final_status_is_rejected(self, _n, _ns):
+        self.client.force_authenticate(user=self.sector_member)
+        resp = self._change_status(self.status_done.id)
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.ticket.refresh_from_db()
+        self.assertEqual(self.ticket.status_id, self.status_open.id)
+        self.assertIsNone(self.ticket.closed_at)
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_closed_ticket_is_rejected(self, _n, _ns):
+        self.ticket.status = self.status_done
+        self.ticket.closed_at = timezone.now()
+        self.ticket.save(update_fields=['status', 'closed_at'])
+
+        self.client.force_authenticate(user=self.sector_member)
+        resp = self._change_status(self.status_waiting.id)
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.ticket.refresh_from_db()
+        self.assertEqual(self.ticket.status_id, self.status_done.id)
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_nonexistent_status_is_rejected(self, _n, _ns):
+        self.client.force_authenticate(user=self.sector_member)
+        resp = self._change_status(999999)
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.ticket.refresh_from_db()
+        self.assertEqual(self.ticket.status_id, self.status_open.id)
+
+    @patch('tickets.views.notify_sector')
+    def test_notifies_owner_and_recipient_but_not_watcher_sector(self, mock_sector):
+        # Acompanhante de setor no chamado — marco, não andamento: não deve ser notificado.
+        TicketWatcher.objects.create(
+            ticket=self.ticket, kind=TicketWatcher.KIND_SECTOR,
+            target_id=self.OUTRO_SETOR, target_name='Mecânica',
+        )
+        self.client.force_authenticate(user=self.sector_member)
+        resp = self._change_status(self.status_waiting.id)
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        mock_sector.assert_not_called()
+        notified = {
+            str(n.recipient_id)
+            for n in Notification.objects.filter(category='ticket', target_id=str(self.ticket.id))
+        }
+        self.assertIn(OWNER_ID, notified)
+        self.assertIn(self.OUTSIDER_ID, notified)
+        # Quem agiu não se autonotifica.
+        self.assertNotIn(OTHER_ID, notified)

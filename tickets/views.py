@@ -459,6 +459,69 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
         return Response(self.get_serializer(ticket).data)
 
 
+    # url_name explícito (mesmo motivo do add_watcher): sem ele o DRF derivaria
+    # 'ticket-change-status' do nome do método, e os testes/o front usam
+    # reverse('ticket-status').
+    @action(detail=True, methods=['post'], url_path='status', url_name='status')
+    def change_status(self, request, pk=None):
+        """HD-31: muda só a situação do chamado — não é editar o conteúdo. Quem
+        atende (dono, setor do ticket, ou admin — _assert_can_handle, mesma regra
+        de close/reopen/watchers) usa isto para registrar andamento (ex.:
+        "Aguardando peça") sem precisar do direito de editar o que o solicitante
+        pediu (_assert_can_edit continua só dono/admin).
+
+        Recusa (400) três casos, cada um com efeito colateral que esta action
+        propositalmente não replica:
+        - chamado já fechado: mudar a situação de um chamado fechado sem também
+          reabrir (limpar closed_at) é o estado inconsistente que o close/reopen
+          evita — oriente a reabrir primeiro;
+        - situação inexistente: sem isso o get() estoura;
+        - situação com is_final=True: encerrar tem efeito colateral (carimba
+          closed_at, notifica diferente) — oriente a usar o botão de fechar, que
+          já faz isso direito.
+        """
+        ticket = self.get_object()
+        self._assert_can_handle(ticket)
+        if ticket.closed_at is not None:
+            return Response(
+                {'detail': 'Ticket está fechado. Reabra o chamado para mudar a situação.'},
+                status=http_status.HTTP_400_BAD_REQUEST,
+            )
+        raw_id = request.data.get('status')
+        try:
+            new_status = TicketStatus.objects.get(pk=raw_id)
+        except (TicketStatus.DoesNotExist, ValueError, TypeError):
+            return Response(
+                {'detail': 'Situação informada não existe.'},
+                status=http_status.HTTP_400_BAD_REQUEST,
+            )
+        if new_status.is_final:
+            return Response(
+                {'detail': 'Situação de encerramento: use o botão de fechar o chamado.'},
+                status=http_status.HTTP_400_BAD_REQUEST,
+            )
+        ticket.status = new_status
+        ticket.save(update_fields=['status', 'updated_at'])
+        TicketLog.objects.create(
+            ticket=ticket,
+            user_id=request.user.id,
+            user_name=request.user.get_full_name(),
+            action=f'Situação alterada para {new_status.name}',
+        )
+        # Só quem está diretamente interessado no andamento: dono + cópia. Ao
+        # contrário de close/reopen (marcos), uma mudança intermediária de
+        # situação NÃO faz fan-out para os setores acompanhantes — vira ruído
+        # rápido se cada "Aguardando peça" virar aviso pra um setor inteiro.
+        # notify() já exclui quem agiu.
+        recipients = [ticket.user_id, *ticket.recipients.values_list('user_id', flat=True)]
+        notify(
+            recipients, 'ticket', ticket.pk,
+            f'Ticket #{ticket.pk}: situação alterada para {new_status.name}',
+            request.user,
+        )
+        return Response(self.get_serializer(ticket).data)
+
+
     @action(detail=True, methods=['post'])
     def reopen(self, request, pk=None):
         ticket = self.get_object()
