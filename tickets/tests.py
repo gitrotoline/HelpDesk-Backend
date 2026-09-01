@@ -9,7 +9,10 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from authentication.auth import RemoteUser
+from core.models import City, Country, State
 from core.s3 import build_key
+from enterprises.models import Enterprise
+from machines.models import Machine
 from sector.services import list_department_sectors
 
 from .attachments import (
@@ -1077,7 +1080,7 @@ class TicketDeleteNotificationsTests(APITestCase):
     def test_delete_still_records_the_log(self):
         self.client.delete(reverse('ticket-detail', args=[self.ticket.id]))
         self.assertTrue(
-            TicketLog.objects.filter(action=f'Ticket #{self.ticket.id} excluído').exists()
+            TicketLog.objects.filter(action=f'Chamado #{self.ticket.id} excluído').exists()
         )
 
 
@@ -1370,7 +1373,7 @@ class CloseReopenStatusChoiceTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertTrue(
             TicketLog.objects.filter(
-                ticket=self.ticket, action='Ticket fechado como Cancelado'
+                ticket=self.ticket, action='Chamado fechado (Cancelado)'
             ).exists()
         )
 
@@ -1379,7 +1382,7 @@ class CloseReopenStatusChoiceTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertTrue(
             TicketLog.objects.filter(
-                ticket=self.ticket, action='Ticket reaberto como Aberto'
+                ticket=self.ticket, action='Chamado reaberto (Aberto)'
             ).exists()
         )
 
@@ -1450,7 +1453,8 @@ class AutoStartProgressOnCommentTests(APITestCase):
         self.assertEqual(self.ticket.status_id, self.status_in_progress.id)
         self.assertTrue(
             TicketLog.objects.filter(
-                ticket=self.ticket, action='Ticket em atendimento (automático)'
+                ticket=self.ticket,
+                action=f'Situação: {self.status_open.name} → {self.status_in_progress.name} (automático)',
             ).exists()
         )
 
@@ -1647,7 +1651,7 @@ class ReopenWithCommentsGoesToInProgressTests(APITestCase):
         self.assertEqual(ticket.status_id, self.status_in_progress.id)
         self.assertTrue(
             TicketLog.objects.filter(
-                ticket=ticket, action='Ticket reaberto como Em atendimento'
+                ticket=ticket, action='Chamado reaberto (Em atendimento)'
             ).exists()
         )
 
@@ -1725,7 +1729,7 @@ class ChangeStatusActionTests(APITestCase):
         self.assertEqual(self.ticket.status_id, self.status_waiting.id)
         self.assertIsNone(self.ticket.closed_at)
         log = TicketLog.objects.filter(ticket=self.ticket).latest('id')
-        self.assertEqual(log.action, f'Situação alterada para {self.status_waiting.name}')
+        self.assertEqual(log.action, f'Situação: {self.status_open.name} → {self.status_waiting.name}')
         self.assertEqual(str(log.user_id), OTHER_ID)
 
     @patch('tickets.views.notify_sector')
@@ -1865,3 +1869,129 @@ class TicketLogApiTests(APITestCase):
         self.assertEqual(row['user_name'], 'Dono')
         self.assertEqual(row['action'], self.log_new.action)
         self.assertIn('created_at', row)
+
+
+class TicketLogMessageFormatTests(APITestCase):
+    """HD-31: a auditoria virou tela — cada edição precisa gerar UM registro por
+    campo relevante alterado, com o valor anterior (senão o histórico não conta
+    nada), e edições sem mudança relevante não podem gerar linha nenhuma (hoje
+    perform_update grava 'Ticket atualizado' mesmo sem nada ter mudado)."""
+
+    def setUp(self):
+        self.ttype = TicketType.objects.create(name='Dúvida')
+        self.ttype2 = TicketType.objects.create(name='Incidente')
+        self.prio = TicketPriority.objects.create(name='Baixa')
+        self.prio2 = TicketPriority.objects.create(name='Alta')
+        self.status_open = TicketStatus.objects.create(name='Aberto', is_default=True)
+
+        country = Country.objects.create(name='Brasil', acronym='BR')
+        state = State.objects.create(name='SP', acronym='SP', country=country)
+        city = City.objects.create(name='São Paulo', state=state)
+        self.enterprise = Enterprise.objects.create(
+            name='Empresa', cnpj='11222333000181', city=city,
+        )
+        self.machine_a = Machine.objects.create(
+            user_id=OWNER_ID, serial_number='12345', enterprise=self.enterprise,
+        )
+        self.machine_b = Machine.objects.create(
+            user_id=OWNER_ID, serial_number='67890', enterprise=self.enterprise,
+        )
+
+        self.client.force_authenticate(user=make_user(user_id=OWNER_ID))
+
+    def _make_ticket(self, **extra):
+        defaults = dict(
+            user_id=OWNER_ID, subject='Assunto original', description='Descrição original',
+            type_of_ticket=self.ttype, priority=self.prio, status=self.status_open,
+        )
+        defaults.update(extra)
+        with patch('tickets.views.notify_sector'), patch('tickets.views.notify'):
+            return Ticket.objects.create(**defaults)
+
+    def _patch(self, ticket, data):
+        with patch('tickets.views.notify_sector'), patch('tickets.views.notify'):
+            return self.client.patch(
+                reverse('ticket-detail', args=[ticket.id]), data, format='json'
+            )
+
+    def test_editing_two_fields_generates_two_separate_logs(self):
+        ticket = self._make_ticket()
+        resp = self._patch(ticket, {
+            'priority': self.prio2.id, 'type_of_ticket': self.ttype2.id,
+        })
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        actions = set(TicketLog.objects.filter(ticket=ticket).values_list('action', flat=True))
+        self.assertIn(f'Prioridade: {self.prio.name} → {self.prio2.name}', actions)
+        self.assertIn(f'Tipo: {self.ttype.name} → {self.ttype2.name}', actions)
+        # Exatamente dois registros — nenhum genérico combinando os dois campos.
+        self.assertEqual(TicketLog.objects.filter(ticket=ticket).count(), 2)
+
+    def test_editing_without_relevant_changes_creates_no_log(self):
+        ticket = self._make_ticket()
+        # Mesmo valor que já está no chamado: nada relevante muda.
+        resp = self._patch(ticket, {'subject': ticket.subject, 'priority': self.prio.id})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertFalse(TicketLog.objects.filter(ticket=ticket).exists())
+
+    def test_null_machine_value_is_displayed_legibly(self):
+        ticket = self._make_ticket(machine=None)
+        resp = self._patch(ticket, {'machine': self.machine_a.id})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(
+            TicketLog.objects.filter(
+                ticket=ticket, action=f'Máquina: — → {self.machine_a.serial_number}',
+            ).exists()
+        )
+        self.assertNotIn(
+            'None',
+            TicketLog.objects.get(ticket=ticket).action,
+        )
+
+    def test_machine_change_between_two_values_is_displayed_legibly(self):
+        ticket = self._make_ticket(machine=self.machine_a)
+        resp = self._patch(ticket, {'machine': self.machine_b.id})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(
+            TicketLog.objects.filter(
+                ticket=ticket,
+                action=f'Máquina: {self.machine_a.serial_number} → {self.machine_b.serial_number}',
+            ).exists()
+        )
+
+    def test_subject_and_description_changes_do_not_leak_values(self):
+        ticket = self._make_ticket()
+        resp = self._patch(ticket, {
+            'subject': 'Assunto novo', 'description': 'Descrição nova',
+        })
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        actions = set(TicketLog.objects.filter(ticket=ticket).values_list('action', flat=True))
+        self.assertEqual(actions, {'Assunto alterado', 'Descrição alterada'})
+
+    def test_automatico_marker_only_on_the_automatic_transition(self):
+        # Edição manual da situação: sem o marcador.
+        status_in_progress = TicketStatus.objects.create(name='Em atendimento', is_in_progress=True)
+        ticket = self._make_ticket()
+        self._patch(ticket, {'status': status_in_progress.id})
+        manual_log = TicketLog.objects.filter(ticket=ticket).latest('id')
+        self.assertEqual(
+            manual_log.action, f'Situação: {self.status_open.name} → {status_in_progress.name}',
+        )
+        self.assertNotIn('(automático)', manual_log.action)
+
+        # A transição automática (ao comentar) é o ÚNICO caminho com o marcador.
+        SECTOR = 'aaaaaaa1-0000-0000-0000-000000000009'
+        ticket2 = self._make_ticket(sector_id=SECTOR, sector_name='Elétrica')
+        sector_member = make_user_with_sector(OTHER_ID, SECTOR, sector_name='Elétrica')
+        self.client.force_authenticate(user=sector_member)
+        with patch('tickets.views.notify_sector'), patch('tickets.views.notify'):
+            resp = self.client.post(
+                reverse('ticket-comment-list'), {'ticket': ticket2.id, 'body': 'oi'},
+            )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        auto_log = TicketLog.objects.filter(
+            ticket=ticket2, action__contains='(automático)',
+        ).latest('id')
+        self.assertEqual(
+            auto_log.action,
+            f'Situação: {self.status_open.name} → {status_in_progress.name} (automático)',
+        )

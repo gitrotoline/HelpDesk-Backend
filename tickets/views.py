@@ -51,6 +51,11 @@ from .filter import TicketFilter
 from .scope import ticket_visibility_q
 
 
+def _log_display(value):
+    """HD-31: valor legível para a auditoria — nunca 'None'/vazio cru."""
+    return value if value not in (None, '') else '—'
+
+
 class AttachmentUploadMixin:
     """Salva anexos enviados no request (multipart, campo `files`) direto no S3.
 
@@ -266,7 +271,7 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
             ticket=ticket,
             user_id=self.request.user.id,
             user_name=self.request.user.get_full_name(),
-            action='Ticket criado',
+            action='Chamado criado',
         )
         # Avisa quem foi colocado em cópia no chamado.
         notify(
@@ -329,22 +334,59 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
 
     def perform_update(self, serializer):
         self._assert_can_edit(serializer.instance)
-        # Captura status e setor antes do save para detectar mudanças.
-        old_status = serializer.instance.status
-        old_sector_id = serializer.instance.sector_id
+        # HD-31: captura os valores ANTES do save — depois disso o objeto em
+        # memória já está com os valores novos, e comparar contra ele mesmo
+        # nunca acusaria diferença nenhuma (FKs sobretudo: o _id muda no
+        # próprio serializer.instance, não numa cópia).
+        instance = serializer.instance
+        old_status_name = instance.status.name
+        old_status_id = instance.status_id
+        old_sector_id = instance.sector_id
+        old_sector_name = instance.sector_name
+        old_priority_name = instance.priority.name
+        old_priority_id = instance.priority_id
+        old_type_name = instance.type_of_ticket.name
+        old_type_id = instance.type_of_ticket_id
+        old_machine_id = instance.machine_id
+        old_machine_display = instance.machine.serial_number if instance.machine_id else None
+        old_subject = instance.subject
+        old_description = instance.description
+
         ticket = serializer.save()
         # Novos anexos enviados na edição (multipart) — adicionados aos existentes.
         self._save_uploaded_attachments(ticket)
-        if ticket.status != old_status:
-            log_action = f'Status: {old_status.name} → {ticket.status.name}'
-        else:
-            log_action = 'Ticket atualizado'
-        TicketLog.objects.create(
-            ticket=ticket,
-            user_id=self.request.user.id,
-            user_name=self.request.user.get_full_name(),
-            action=log_action,
-        )
+
+        # HD-31: uma linha por campo alterado — uma edição que muda setor e
+        # prioridade gera DOIS registros, não um genérico "Ticket atualizado"
+        # (que hoje grava mesmo quando nada relevante mudou de fato).
+        changes = []
+        if ticket.status_id != old_status_id:
+            changes.append(f'Situação: {old_status_name} → {ticket.status.name}')
+        if ticket.sector_id != old_sector_id:
+            changes.append(
+                f'Setor: {_log_display(old_sector_name)} → {_log_display(ticket.sector_name)}'
+            )
+        if ticket.priority_id != old_priority_id:
+            changes.append(f'Prioridade: {old_priority_name} → {ticket.priority.name}')
+        if ticket.type_of_ticket_id != old_type_id:
+            changes.append(f'Tipo: {old_type_name} → {ticket.type_of_ticket.name}')
+        if ticket.machine_id != old_machine_id:
+            new_machine_display = ticket.machine.serial_number if ticket.machine_id else None
+            changes.append(
+                f'Máquina: {_log_display(old_machine_display)} → {_log_display(new_machine_display)}'
+            )
+        if ticket.subject != old_subject:
+            changes.append('Assunto alterado')
+        if ticket.description != old_description:
+            changes.append('Descrição alterada')
+
+        for action_text in changes:
+            TicketLog.objects.create(
+                ticket=ticket,
+                user_id=self.request.user.id,
+                user_name=self.request.user.get_full_name(),
+                action=action_text,
+            )
         # Avisa o dono do ticket quando OUTRA pessoa o altera (não notifica a si mesmo).
         if str(ticket.user_id) != str(self.request.user.id):
             notify([ticket.user_id], 'ticket', ticket.pk, f'Ticket #{ticket.pk} foi atualizado', self.request.user)
@@ -373,7 +415,7 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
             TicketLog.objects.create(
                 user_id=self.request.user.id,
                 user_name=self.request.user.get_full_name(),
-                action=f'Ticket #{ticket_pk} excluído',
+                action=f'Chamado #{ticket_pk} excluído',
             )
 
 
@@ -453,7 +495,7 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
             ticket=ticket,
             user_id=request.user.id,
             user_name=request.user.get_full_name(),
-            action=f'Ticket fechado como {final_status.name}',
+            action=f'Chamado fechado ({final_status.name})',
         )
         notify([ticket.user_id], 'ticket', ticket.pk, f'Ticket #{ticket.pk} foi fechado', request.user)
         self._notify_watchers(ticket, f'Ticket #{ticket.pk} foi fechado')
@@ -501,13 +543,14 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
                 {'detail': 'Situação de encerramento: use o botão de fechar o chamado.'},
                 status=http_status.HTTP_400_BAD_REQUEST,
             )
+        old_status_name = ticket.status.name
         ticket.status = new_status
         ticket.save(update_fields=['status', 'updated_at'])
         TicketLog.objects.create(
             ticket=ticket,
             user_id=request.user.id,
             user_name=request.user.get_full_name(),
-            action=f'Situação alterada para {new_status.name}',
+            action=f'Situação: {old_status_name} → {new_status.name}',
         )
         # Só quem está diretamente interessado no andamento: dono + cópia. Ao
         # contrário de close/reopen (marcos), uma mudança intermediária de
@@ -560,7 +603,7 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
             ticket=ticket,
             user_id=request.user.id,
             user_name=request.user.get_full_name(),
-            action=f'Ticket reaberto como {new_status.name}',
+            action=f'Chamado reaberto ({new_status.name})',
         )
         notify([ticket.user_id], 'ticket', ticket.pk, f'Ticket #{ticket.pk} foi reaberto', request.user)
         self._notify_watchers(ticket, f'Ticket #{ticket.pk} foi reaberto')
@@ -848,13 +891,14 @@ class TicketCommentViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
         if not in_sector:
             return
         in_progress_status = in_progress_candidates[0]
+        old_status_name = ticket.status.name
         ticket.status = in_progress_status
         ticket.save(update_fields=['status', 'updated_at'])
         TicketLog.objects.create(
             ticket=ticket,
             user_id=user.id,
             user_name=user.get_full_name(),
-            action='Ticket em atendimento (automático)',
+            action=f'Situação: {old_status_name} → {in_progress_status.name} (automático)',
         )
 
 
@@ -886,7 +930,7 @@ class TicketCommentViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
             ticket=ticket,
             user_id=self.request.user.id,
             user_name=self.request.user.get_full_name(),
-            action='Comentário adicionado',
+            action=f'Comentário #{comment.pk} adicionado',
         )
         self._maybe_start_progress(ticket)
         message = f'Nova resposta no ticket #{ticket.pk}'
@@ -906,18 +950,19 @@ class TicketCommentViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
             ticket=comment.ticket,
             user_id=self.request.user.id,
             user_name=self.request.user.get_full_name(),
-            action='Comentário editado',
+            action=f'Comentário #{comment.pk} editado',
         )
 
     def perform_destroy(self, instance):
         self._assert_can_delete(instance)
         ticket = instance.ticket
+        comment_pk = instance.pk
         instance.delete()
         TicketLog.objects.create(
             ticket=ticket,
             user_id=self.request.user.id,
             user_name=self.request.user.get_full_name(),
-            action='Comentário excluído',
+            action=f'Comentário #{comment_pk} excluído',
         )
 
 
