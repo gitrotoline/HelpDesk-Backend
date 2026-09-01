@@ -376,6 +376,59 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
             )
 
 
+    def _resolve_status_choice(self, request, *, search_flag, is_valid, invalid_detail, verb):
+        """HD-31: nunca escolher em silêncio.
+
+        `search_flag` é o campo booleano usado para achar o candidato ÚNICO
+        quando `status` vem omitido ('is_final' para close, 'is_default' para
+        reopen). `is_valid` é o predicado usado para VALIDAR um `status`
+        informado explicitamente — para reopen ele é diferente do search_flag
+        (precisa `is_final=False`, não `is_default=True`: reabrir só exige que
+        a situação não seja de encerramento, mesmo que não seja "a" padrão).
+        `invalid_detail` é a mensagem de erro para esse caso; `verb` entra na
+        mensagem de "nenhuma"/"mais de uma" ("encerrar"/"reabrir").
+
+        Três caminhos:
+        - `status` informado no corpo: precisa existir E passar em `is_valid`
+          — senão 400 com mensagem que distingue "não existe" de "não serve".
+        - omitido e exatamente um candidato (`search_flag=True`): usa ele —
+          mesmo comportamento de sempre quando só há uma situação cadastrada.
+        - omitido e 0 ou 2+ candidatos: 400. Antes isto caía num
+          `.filter(...).first()` sem `ordering` no Meta nem unique constraint,
+          que escolhia uma linha arbitrária (a ordem física da tabela) sem
+          erro nenhum assim que existisse mais de uma situação com o flag —
+          ex.: "Fechado" e "Cancelado" as duas com is_final=True.
+
+        Devolve (status_obj, None) ou (None, Response) — o caller repassa a
+        Response de erro direto.
+        """
+        raw_id = request.data.get('status')
+        if raw_id not in (None, ''):
+            try:
+                chosen = TicketStatus.objects.get(pk=raw_id)
+            except (TicketStatus.DoesNotExist, ValueError, TypeError):
+                return None, Response(
+                    {'detail': 'Situação informada não existe.'},
+                    status=http_status.HTTP_400_BAD_REQUEST,
+                )
+            if not is_valid(chosen):
+                return None, Response({'detail': invalid_detail}, status=http_status.HTTP_400_BAD_REQUEST)
+            return chosen, None
+
+        candidates = list(TicketStatus.objects.filter(**{search_flag: True})[:2])
+        if len(candidates) == 0:
+            return None, Response(
+                {'detail': f'Nenhuma situação cadastrada para {verb} o chamado.'},
+                status=http_status.HTTP_400_BAD_REQUEST,
+            )
+        if len(candidates) > 1:
+            return None, Response(
+                {'detail': f'Existe mais de uma situação possível para {verb} o chamado; informe qual usar.'},
+                status=http_status.HTTP_400_BAD_REQUEST,
+            )
+        return candidates[0], None
+
+
     @action(detail=True, methods=['post'])
     def close(self, request, pk=None):
         ticket = self.get_object()
@@ -385,12 +438,13 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
                 {'detail': 'Ticket já está fechado.'},
                 status=http_status.HTTP_400_BAD_REQUEST,
             )
-        final_status = TicketStatus.objects.filter(is_final=True).first()
-        if final_status is None:
-            return Response(
-                {'detail': 'Nenhum status com is_final=True cadastrado.'},
-                status=http_status.HTTP_400_BAD_REQUEST,
-            )
+        final_status, error = self._resolve_status_choice(
+            request, search_flag='is_final', is_valid=lambda s: s.is_final,
+            invalid_detail='Situação informada não é uma situação de encerramento.',
+            verb='encerrar',
+        )
+        if error is not None:
+            return error
         ticket.status = final_status
         ticket.closed_at = timezone.now()
         ticket.save(update_fields=['status', 'closed_at', 'updated_at'])
@@ -398,7 +452,7 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
             ticket=ticket,
             user_id=request.user.id,
             user_name=request.user.get_full_name(),
-            action='Ticket fechado',
+            action=f'Ticket fechado como {final_status.name}',
         )
         notify([ticket.user_id], 'ticket', ticket.pk, f'Ticket #{ticket.pk} foi fechado', request.user)
         self._notify_watchers(ticket, f'Ticket #{ticket.pk} foi fechado')
@@ -414,15 +468,13 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
                 {'detail': 'Ticket não está fechado.'},
                 status=http_status.HTTP_400_BAD_REQUEST,
             )
-        default_status = (
-            TicketStatus.objects.filter(is_default=True).first()
-            or TicketStatus.objects.filter(is_final=False).first()
+        default_status, error = self._resolve_status_choice(
+            request, search_flag='is_default', is_valid=lambda s: not s.is_final,
+            invalid_detail='Situação informada não pode ser usada para reabrir (é uma situação de encerramento).',
+            verb='reabrir',
         )
-        if default_status is None:
-            return Response(
-                {'detail': 'Nenhum status de reabertura cadastrado.'},
-                status=http_status.HTTP_400_BAD_REQUEST,
-            )
+        if error is not None:
+            return error
         ticket.status = default_status
         ticket.closed_at = None
         ticket.save(update_fields=['status', 'closed_at', 'updated_at'])
@@ -430,7 +482,7 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
             ticket=ticket,
             user_id=request.user.id,
             user_name=request.user.get_full_name(),
-            action='Ticket reaberto',
+            action=f'Ticket reaberto como {default_status.name}',
         )
         notify([ticket.user_id], 'ticket', ticket.pk, f'Ticket #{ticket.pk} foi reaberto', request.user)
         self._notify_watchers(ticket, f'Ticket #{ticket.pk} foi reaberto')

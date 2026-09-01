@@ -1193,3 +1193,192 @@ class SectorHandlerPermissionsTests(APITestCase):
         resp = self.client.delete(reverse('ticket-detail', args=[self.ticket.id]))
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
         self.assertTrue(Ticket.objects.filter(pk=self.ticket.pk).exists())
+
+
+class CloseReopenStatusChoiceTests(APITestCase):
+    """HD-31: close/reopen nunca escolhem em silêncio quando há mais de uma
+    situação candidata (ou nenhuma). Cobre a regra descrita em
+    TicketViewSet._resolve_status_choice."""
+
+    def setUp(self):
+        self.ttype = TicketType.objects.create(name='Problema')
+        self.prio = TicketPriority.objects.create(name='Alta')
+        self.status_open = TicketStatus.objects.create(name='Aberto', is_default=True)
+        self.ticket = Ticket.objects.create(
+            user_id=OWNER_ID, subject='T', type_of_ticket=self.ttype,
+            priority=self.prio, status=self.status_open,
+        )
+        self.client.force_authenticate(user=make_user())
+
+    def _close(self, ticket=None, status_id=None):
+        data = {'status': status_id} if status_id is not None else {}
+        return self.client.post(reverse('ticket-close', args=[(ticket or self.ticket).id]), data)
+
+    def _reopen(self, ticket=None, status_id=None):
+        data = {'status': status_id} if status_id is not None else {}
+        return self.client.post(reverse('ticket-reopen', args=[(ticket or self.ticket).id]), data)
+
+    # ── close ──────────────────────────────────────────────────────────────
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_close_single_final_status_without_body_closes(self, _n, _ns):
+        # 1. Uma única situação final, sem `status` no corpo → comportamento
+        # preservado.
+        final = TicketStatus.objects.create(name='Fechado', is_final=True)
+        resp = self._close()
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.ticket.refresh_from_db()
+        self.assertIsNotNone(self.ticket.closed_at)
+        self.assertEqual(self.ticket.status_id, final.id)
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_close_two_final_statuses_without_body_is_rejected(self, _n, _ns):
+        # 2. Duas finais, sem `status` → 400, e o chamado não é fechado.
+        TicketStatus.objects.create(name='Fechado', is_final=True)
+        TicketStatus.objects.create(name='Cancelado', is_final=True)
+        resp = self._close()
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.ticket.refresh_from_db()
+        self.assertIsNone(self.ticket.closed_at)
+        self.assertEqual(self.ticket.status_id, self.status_open.id)
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_close_two_final_statuses_with_valid_status_closes_with_chosen(self, _n, _ns):
+        # 3. Duas finais, com `status` válido → fecha com a situação escolhida.
+        TicketStatus.objects.create(name='Fechado', is_final=True)
+        cancelado = TicketStatus.objects.create(name='Cancelado', is_final=True)
+        resp = self._close(status_id=cancelado.id)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.ticket.refresh_from_db()
+        self.assertIsNotNone(self.ticket.closed_at)
+        self.assertEqual(self.ticket.status_id, cancelado.id)
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_close_with_non_final_status_is_rejected(self, _n, _ns):
+        # 4. `status` que não é final → 400.
+        resp = self._close(status_id=self.status_open.id)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.ticket.refresh_from_db()
+        self.assertIsNone(self.ticket.closed_at)
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_close_with_nonexistent_status_is_rejected(self, _n, _ns):
+        # 5. `status` inexistente → 400.
+        resp = self._close(status_id=999999)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.ticket.refresh_from_db()
+        self.assertIsNone(self.ticket.closed_at)
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_close_no_final_status_registered_is_rejected(self, _n, _ns):
+        resp = self._close()
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    # ── reopen (simétrico) ────────────────────────────────────────────────
+
+    def _make_closed_ticket(self, final_status):
+        with patch('tickets.views.notify_sector'), patch('tickets.views.notify'):
+            ticket = Ticket.objects.create(
+                user_id=OWNER_ID, subject='T2', type_of_ticket=self.ttype,
+                priority=self.prio, status=final_status, closed_at=timezone.now(),
+            )
+        return ticket
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_reopen_single_default_status_without_body_reopens(self, _n, _ns):
+        final = TicketStatus.objects.create(name='Fechado', is_final=True)
+        ticket = self._make_closed_ticket(final)
+        resp = self._reopen(ticket)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ticket.refresh_from_db()
+        self.assertIsNone(ticket.closed_at)
+        self.assertEqual(ticket.status_id, self.status_open.id)
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_reopen_two_default_statuses_without_body_is_rejected(self, _n, _ns):
+        final = TicketStatus.objects.create(name='Fechado', is_final=True)
+        TicketStatus.objects.create(name='Em análise', is_default=True)
+        ticket = self._make_closed_ticket(final)
+        resp = self._reopen(ticket)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        ticket.refresh_from_db()
+        self.assertIsNotNone(ticket.closed_at)
+        self.assertEqual(ticket.status_id, final.id)
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_reopen_two_default_statuses_with_valid_status_reopens_with_chosen(self, _n, _ns):
+        final = TicketStatus.objects.create(name='Fechado', is_final=True)
+        analise = TicketStatus.objects.create(name='Em análise', is_default=True)
+        ticket = self._make_closed_ticket(final)
+        resp = self._reopen(ticket, status_id=analise.id)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ticket.refresh_from_db()
+        self.assertIsNone(ticket.closed_at)
+        self.assertEqual(ticket.status_id, analise.id)
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_reopen_with_final_status_is_rejected(self, _n, _ns):
+        final = TicketStatus.objects.create(name='Fechado', is_final=True)
+        ticket = self._make_closed_ticket(final)
+        resp = self._reopen(ticket, status_id=final.id)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        ticket.refresh_from_db()
+        self.assertIsNotNone(ticket.closed_at)
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_reopen_with_nonexistent_status_is_rejected(self, _n, _ns):
+        final = TicketStatus.objects.create(name='Fechado', is_final=True)
+        ticket = self._make_closed_ticket(final)
+        resp = self._reopen(ticket, status_id=999999)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        ticket.refresh_from_db()
+        self.assertIsNotNone(ticket.closed_at)
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_reopen_no_default_status_registered_is_rejected(self, _n, _ns):
+        # Sem fallback: nenhuma is_default cadastrada → 400 (não pega "qualquer
+        # não-final" como o antigo `filter(is_final=False).first()` fazia).
+        self.status_open.is_default = False
+        self.status_open.save(update_fields=['is_default'])
+        final = TicketStatus.objects.create(name='Fechado', is_final=True)
+        ticket = self._make_closed_ticket(final)
+        resp = self._reopen(ticket)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        ticket.refresh_from_db()
+        self.assertIsNotNone(ticket.closed_at)
+
+    # ── auditoria ─────────────────────────────────────────────────────────
+
+    @patch('tickets.views.notify_sector')
+    @patch('tickets.views.notify')
+    def test_ticket_log_records_applied_status_on_close_and_reopen(self, _n, _ns):
+        # 7. O TicketLog registra a situação aplicada.
+        final = TicketStatus.objects.create(name='Cancelado', is_final=True)
+        resp = self._close()
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(
+            TicketLog.objects.filter(
+                ticket=self.ticket, action='Ticket fechado como Cancelado'
+            ).exists()
+        )
+
+        self.ticket.refresh_from_db()
+        resp = self._reopen()
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(
+            TicketLog.objects.filter(
+                ticket=self.ticket, action='Ticket reaberto como Aberto'
+            ).exists()
+        )
