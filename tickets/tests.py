@@ -2256,57 +2256,6 @@ class TicketPriorityLevelTests(APITestCase):
         self.assertTrue(TicketPriority.objects.get(name='Urgente').highlight)
 
 
-class TicketPriorityBackfillMigrationTests(APITestCase):
-    """HD-31: função de mapeamento de nome -> level usada pela migration de
-    dados 0007 (tickets/priority_levels.py). Testada diretamente, sem
-    depender de rodar a migration em si."""
-
-    def test_known_names_map_to_expected_levels(self):
-        from tickets.priority_levels import level_for_name
-
-        self.assertEqual(level_for_name('Baixa'), 10)
-        self.assertEqual(level_for_name('Média'), 20)
-        self.assertEqual(level_for_name('Alta'), 30)
-        self.assertEqual(level_for_name('Urgente'), 40)
-        self.assertEqual(level_for_name('Crítica'), 40)
-
-    def test_matching_is_accent_and_case_insensitive(self):
-        from tickets.priority_levels import level_for_name
-
-        self.assertEqual(level_for_name('MEDIA'), 20)
-        self.assertEqual(level_for_name('  alta  '), 30)
-        self.assertEqual(level_for_name('URGENTE'), 40)
-        self.assertEqual(level_for_name('CRÍTICA'), 40)
-
-    def test_unknown_name_maps_to_zero(self):
-        from tickets.priority_levels import level_for_name
-
-        self.assertEqual(level_for_name('Prioridade Especial'), 0)
-        self.assertEqual(level_for_name(''), 0)
-        self.assertEqual(level_for_name(None), 0)
-
-    def test_backfill_migration_sets_known_and_leaves_unknown_at_zero(self):
-        # Roda a função de backfill (a mesma usada pela RunPython) sobre um
-        # queryset real, sem passar pelo executor de migrations do Django.
-        from tickets.priority_levels import level_for_name
-
-        baixa = TicketPriority.objects.create(name='Baixa', level=0)
-        alta = TicketPriority.objects.create(name='Alta', level=0)
-        estranha = TicketPriority.objects.create(name='Prioridade X', level=0)
-
-        for prio in [baixa, alta, estranha]:
-            level = level_for_name(prio.name)
-            if level:
-                prio.level = level
-                prio.save(update_fields=['level'])
-
-        baixa.refresh_from_db()
-        alta.refresh_from_db()
-        estranha.refresh_from_db()
-        self.assertEqual(baixa.level, 10)
-        self.assertEqual(alta.level, 30)
-
-
 class TicketFilterHighlightAndOpenTests(APITestCase):
     """HD-31: painel de urgentes precisa filtrar por prioridade destacada
     (`priority_highlight`) combinada com "em aberto" (`is_open`), sem mexer

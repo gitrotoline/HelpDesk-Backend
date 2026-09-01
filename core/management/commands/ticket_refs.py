@@ -1,58 +1,73 @@
-"""
-Command to seed ticket reference data (status, priorities, types).
+"""Cadastros de referência do chamado: situações, prioridades e tipos.
+Mesmo espírito de `machine_refs` e `enterprises_refs`.
 
-Usage: python manage.py ticket_refs
+Idempotente: pode rodar quantas vezes quiser. Cria o que falta e ATUALIZA o
+que existe (grau e destaque da prioridade, flags da situação), porque o valor
+desses campos é a razão do comando existir — deixar um registro antigo com
+grau 0 anularia o efeito.
 """
 
 from django.core.management.base import BaseCommand
-from tickets.models import TicketStatus, TicketPriority, TicketType
 
+from tickets.models import TicketPriority, TicketStatus, TicketType
 
-# (name, is_default, is_final)
-# is_default: status de um chamado (re)aberto; is_final: status que encerra.
-STATUSES = [
-    ("Aberto", True, False),
-    ("Em andamento", False, False),
-    ("Fechado", False, True),
+# (nome, grau, destacar na listagem). Grau: quanto MAIOR, mais urgente.
+PRIORITIES = [
+    ("Baixa", 1, False),
+    ("Média", 2, False),
+    ("Alta", 3, False),
+    ("Urgente", 4, True),
+    ("Crítico", 5, True),
 ]
 
-PRIORITIES = ["Baixa", "Média", "Alta", "Urgente"]
+# (nome, is_default, is_final, is_in_progress). Sem uma situação padrão o
+# sistema não abre chamado nenhum: a criação resolve a situação inicial pelo
+# cadastro e devolve 400 quando não há candidata.
+STATUSES = [
+    ("Aberto", True, False, False),
+    ("Em andamento", False, False, True),
+    ("Espera de Material", False, False, False),
+    ("Fechado", False, True, False),
+    ("Cancelado", False, True, False),
+]
 
 TYPES = ["Dúvida", "Problema", "Solicitação"]
 
 
 class Command(BaseCommand):
-    help = 'Seed the database with ticket reference data (status, priorities, types)'
+    help = 'Cria/atualiza situações, prioridades e tipos de chamado.'
 
     def handle(self, *args, **options):
-        self.stdout.write('Starting ticket refs seed...')
-
-        created = 0
-
-        for name, is_default, is_final in STATUSES:
-            _, was_created = TicketStatus.objects.get_or_create(
-                name=name,
-                defaults={'is_default': is_default, 'is_final': is_final},
+        for name, level, highlight in PRIORITIES:
+            obj, created = TicketPriority.objects.get_or_create(
+                name=name, defaults={'level': level, 'highlight': highlight},
             )
-            if was_created:
-                created += 1
-                self.stdout.write(f'  [OK] Status: {name}')
+            if not created and (obj.level != level or obj.highlight != highlight):
+                obj.level, obj.highlight = level, highlight
+                obj.save(update_fields=['level', 'highlight'])
+            self.stdout.write(
+                f"  prioridade {'criada ' if created else 'ajustada'}: "
+                f"{name} (grau {level}{', destaque' if highlight else ''})"
+            )
 
-        for name in PRIORITIES:
-            _, was_created = TicketPriority.objects.get_or_create(name=name)
-            if was_created:
-                created += 1
-                self.stdout.write(f'  [OK] Priority: {name}')
+        for name, is_default, is_final, is_in_progress in STATUSES:
+            obj, created = TicketStatus.objects.get_or_create(
+                name=name,
+                defaults={
+                    'is_default': is_default,
+                    'is_final': is_final,
+                    'is_in_progress': is_in_progress,
+                },
+            )
+            if not created:
+                obj.is_default, obj.is_final, obj.is_in_progress = (
+                    is_default, is_final, is_in_progress,
+                )
+                obj.save(update_fields=['is_default', 'is_final', 'is_in_progress'])
+            self.stdout.write(f"  situação {'criada ' if created else 'ajustada'}: {name}")
 
         for name in TYPES:
-            _, was_created = TicketType.objects.get_or_create(name=name)
-            if was_created:
-                created += 1
-                self.stdout.write(f'  [OK] Type: {name}')
+            _, created = TicketType.objects.get_or_create(name=name)
+            self.stdout.write(f"  tipo {'criado ' if created else 'existente'}: {name}")
 
-        self.stdout.write('')
-        self.stdout.write('Ticket refs seed completed!')
-        self.stdout.write(f'  Created: {created}')
-        self.stdout.write(f'  Status total: {TicketStatus.objects.count()}')
-        self.stdout.write(f'  Priority total: {TicketPriority.objects.count()}')
-        self.stdout.write(f'  Type total: {TicketType.objects.count()}')
+        self.stdout.write(self.style.SUCCESS('Cadastros de chamado prontos.'))
