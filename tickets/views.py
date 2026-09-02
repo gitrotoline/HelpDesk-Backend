@@ -159,8 +159,15 @@ class TicketViewSet(AttachmentUploadMixin, viewsets.ModelViewSet):
 
     def retrieve(self, request, *args, **kwargs):
         # Abrir o ticket registra a visualização do usuário (idempotente).
+        # HD-31 (dashboard): AVANÇA o carimbo a cada abertura. O filtro
+        # `has_news` compara a última atividade do chamado com este viewed_at;
+        # com get_or_create ele ficava preso na primeira abertura e "novidade"
+        # seria tudo que aconteceu desde sempre.
         instance = self.get_object()
-        TicketView.objects.get_or_create(ticket=instance, user_id=request.user.id)
+        TicketView.objects.update_or_create(
+            ticket=instance, user_id=request.user.id,
+            defaults={'viewed_at': timezone.now()},
+        )
         return Response(self.get_serializer(instance).data)
 
 

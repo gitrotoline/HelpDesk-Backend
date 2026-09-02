@@ -1,3 +1,4 @@
+import uuid
 from unittest.mock import patch
 
 import requests
@@ -33,6 +34,7 @@ from .models import (
     TicketRecipient,
     TicketStatus,
     TicketType,
+    TicketView,
     TicketWatcher,
 )
 
@@ -2311,3 +2313,222 @@ class TicketFilterHighlightAndOpenTests(APITestCase):
             self._subjects(resp),
             {'Urgente aberto', 'Urgente fechado', 'Comum aberto'},
         )
+
+
+class TicketViewTouchTests(APITestCase):
+    """HD-31 (dashboard): abrir o chamado AVANÇA o viewed_at. Antes o registro
+    era criado na primeira abertura e nunca mais tocado — servia para "já vi
+    alguma vez", não para "vi por último quando", que é o que o filtro
+    has_news precisa."""
+
+    def setUp(self):
+        self.ttype = TicketType.objects.create(name='Problema')
+        self.prio = TicketPriority.objects.create(name='Baixa')
+        self.status_open = TicketStatus.objects.create(name='Aberto', is_default=True)
+        self.ticket = Ticket.objects.create(
+            user_id=OWNER_ID, subject='Toque', type_of_ticket=self.ttype,
+            priority=self.prio, status=self.status_open,
+        )
+        self.client.force_authenticate(user=make_user())
+        self.url = reverse('ticket-detail', args=[self.ticket.pk])
+
+    def test_second_open_moves_viewed_at_forward(self):
+        self.client.get(self.url)
+        first = TicketView.objects.get(ticket=self.ticket, user_id=OWNER_ID).viewed_at
+        # Sem sleep: empurra o carimbo para o passado e abre de novo.
+        pushed_back = first - timezone.timedelta(minutes=5)
+        TicketView.objects.filter(ticket=self.ticket, user_id=OWNER_ID).update(
+            viewed_at=pushed_back
+        )
+        self.client.get(self.url)
+        second = TicketView.objects.get(ticket=self.ticket, user_id=OWNER_ID).viewed_at
+        # Sem o fix, `second` continuaria igual a `pushed_back`.
+        self.assertGreater(second, pushed_back)
+
+    def test_still_one_row_per_ticket_and_user(self):
+        self.client.get(self.url)
+        self.client.get(self.url)
+        self.assertEqual(
+            TicketView.objects.filter(ticket=self.ticket, user_id=OWNER_ID).count(), 1
+        )
+
+
+class TicketFilterAwaitingTests(APITestCase):
+    """HD-31 (dashboard): `awaiting=true` = em aberto E na situação padrão
+    (ninguém pegou); `awaiting=false` = em aberto E fora da padrão (em
+    andamento, espera de material...). Os dois EXCLUEM fechados — os blocos da
+    home que usam isto são "em aberto" por definição."""
+
+    def setUp(self):
+        self.ttype = TicketType.objects.create(name='Problema')
+        self.prio = TicketPriority.objects.create(name='Baixa')
+        self.st_default = TicketStatus.objects.create(name='Aberto', is_default=True)
+        self.st_progress = TicketStatus.objects.create(name='Em andamento', is_in_progress=True)
+        self.st_neutral = TicketStatus.objects.create(name='Espera de Material')
+        self.st_final = TicketStatus.objects.create(name='Fechado', is_final=True)
+
+        def mk(subject, st, closed=False):
+            return Ticket.objects.create(
+                user_id=OWNER_ID, subject=subject, type_of_ticket=self.ttype,
+                priority=self.prio, status=st,
+                closed_at=timezone.now() if closed else None,
+            )
+
+        mk('padrao aberto', self.st_default)
+        mk('andamento', self.st_progress)
+        mk('espera material', self.st_neutral)
+        mk('fechado', self.st_final, closed=True)
+        # Dado ruim de propósito: fechado mas ainda na situação padrão.
+        mk('fechado na padrao', self.st_default, closed=True)
+        self.client.force_authenticate(user=make_user())
+
+    def _subjects(self, **params):
+        resp = self.client.get(reverse('ticket-list'), params)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        return {t['subject'] for t in resp.data['results']}
+
+    def test_awaiting_true_is_default_status_and_open(self):
+        self.assertEqual(self._subjects(awaiting='true'), {'padrao aberto'})
+
+    def test_awaiting_false_is_open_outside_default_status(self):
+        self.assertEqual(
+            self._subjects(awaiting='false'), {'andamento', 'espera material'}
+        )
+
+    def test_without_param_everything_still_comes(self):
+        self.assertEqual(len(self._subjects()), 5)
+
+
+class TicketFilterHasNewsTests(APITestCase):
+    """HD-31 (dashboard): `has_news=true` = em aberto E (nunca abri OU houve
+    atividade depois da minha última abertura). Atividade = alteração no
+    chamado (updated_at) ou comentário DE OUTRA PESSOA. Comentário meu não é
+    novidade para mim."""
+
+    def setUp(self):
+        self.ttype = TicketType.objects.create(name='Problema')
+        self.prio = TicketPriority.objects.create(name='Baixa')
+        self.st_open = TicketStatus.objects.create(name='Aberto', is_default=True)
+        self.st_final = TicketStatus.objects.create(name='Fechado', is_final=True)
+        self.me = make_user(user_id=OWNER_ID)
+        self.client.force_authenticate(user=self.me)
+
+    def _ticket(self, subject, closed=False):
+        return Ticket.objects.create(
+            user_id=OWNER_ID, subject=subject, type_of_ticket=self.ttype,
+            priority=self.prio, status=self.st_final if closed else self.st_open,
+            closed_at=timezone.now() if closed else None,
+        )
+
+    def _viewed(self, ticket, minutes_ago):
+        # Registra que EU abri o chamado há N minutos. update() depois do
+        # create porque viewed_at é auto_now_add e ignora valor no create.
+        view = TicketView.objects.create(ticket=ticket, user_id=OWNER_ID)
+        TicketView.objects.filter(pk=view.pk).update(
+            viewed_at=timezone.now() - timezone.timedelta(minutes=minutes_ago)
+        )
+
+    def _age(self, ticket, minutes_ago):
+        # Empurra updated_at para o passado (auto_now não deixa setar no save).
+        Ticket.objects.filter(pk=ticket.pk).update(
+            updated_at=timezone.now() - timezone.timedelta(minutes=minutes_ago)
+        )
+
+    def _comment(self, ticket, by):
+        return TicketComment.objects.create(
+            ticket=ticket, user_id=by, user_name='Alguem', body='oi',
+        )
+
+    def _news(self):
+        resp = self.client.get(reverse('ticket-list'), {'has_news': 'true'})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        return {t['subject'] for t in resp.data['results']}
+
+    def _not_news(self):
+        resp = self.client.get(reverse('ticket-list'), {'has_news': 'false'})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        return {t['subject'] for t in resp.data['results']}
+
+    def test_never_opened_is_news(self):
+        self._ticket('nunca abri')
+        self.assertEqual(self._news(), {'nunca abri'})
+
+    def test_opened_and_nothing_happened_is_not_news(self):
+        t = self._ticket('quieto')
+        self._age(t, 30)
+        self._viewed(t, 10)
+        self.assertEqual(self._news(), set())
+
+    def test_other_person_comment_after_my_view_is_news(self):
+        t = self._ticket('comentaram')
+        self._age(t, 30)
+        self._viewed(t, 10)
+        self._comment(t, by=OTHER_ID)  # agora > viewed_at
+        self.assertEqual(self._news(), {'comentaram'})
+
+    def test_my_own_comment_is_not_news(self):
+        t = self._ticket('eu comentei')
+        self._age(t, 30)
+        self._viewed(t, 10)
+        self._comment(t, by=OWNER_ID)
+        self.assertEqual(self._news(), set())
+
+    def test_ticket_edited_after_my_view_is_news(self):
+        t = self._ticket('editaram')
+        self._viewed(t, 10)
+        # updated_at = agora (auto_now no create) > viewed_at (10 min atrás)
+        self.assertEqual(self._news(), {'editaram'})
+
+    def test_closed_ticket_with_new_comment_is_not_news(self):
+        t = self._ticket('fechado', closed=True)
+        self._age(t, 30)
+        self._viewed(t, 10)
+        self._comment(t, by=OTHER_ID)
+        self.assertEqual(self._news(), set())
+
+    def test_out_of_scope_ticket_with_news_is_not_listed(self):
+        # Chamado de outra pessoa, outro setor, sem cópia/acompanhante: fora do
+        # meu escopo. Tem novidade (nunca abri), mas não pode aparecer —
+        # prova que o filtro parte do get_queryset já filtrado.
+        Ticket.objects.create(
+            user_id=OTHER_ID, subject='alheio', type_of_ticket=self.ttype,
+            priority=self.prio, status=self.st_open,
+            sector_id=uuid.uuid4(),
+        )
+        self.assertEqual(self._news(), set())
+
+    def test_has_news_false_is_the_complement_and_runs_on_postgres(self):
+        # A home nao usa has_news=false, mas o ramo existe (simetria do
+        # BooleanFilter) e faz exclude(pk__in=<subquery com annotate>) —
+        # precisa ao menos EXECUTAR no Postgres e ser o complemento exato.
+        quieto = self._ticket('quieto')
+        self._age(quieto, 30)
+        self._viewed(quieto, 10)
+        comentaram = self._ticket('comentaram')
+        self._age(comentaram, 30)
+        self._viewed(comentaram, 10)
+        self._comment(comentaram, by=OTHER_ID)
+        self.assertEqual(self._news(), {'comentaram'})
+        self.assertEqual(self._not_news(), {'quieto'})
+
+    def test_has_news_for_sector_member_lists_sector_ticket_once(self):
+        # Cenario de producao que os outros casos nao cobrem: o chamado chega
+        # ao usuario pelo SETOR (join multi-valorado no escopo), nao por ser
+        # dono. Tem que aparecer — e aparecer UMA vez (distinct), com a
+        # contagem batendo.
+        sector_id = uuid.uuid4()
+        member = make_user_with_sector(OWNER_ID, sector_id)
+        self.client.force_authenticate(user=member)
+        t = Ticket.objects.create(
+            user_id=OTHER_ID, subject='do meu setor', type_of_ticket=self.ttype,
+            priority=self.prio, status=self.st_open, sector_id=sector_id,
+        )
+        self._comment(t, by=OTHER_ID)
+        self._comment(t, by=OTHER_ID)  # 2 comentarios: chance de duplicar
+        resp = self.client.get(
+            reverse('ticket-list'),
+            {'has_news': 'true', 'ordering': '-priority__level,created_at'},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['count'], 1)
+        self.assertEqual([x['subject'] for x in resp.data['results']], ['do meu setor'])
